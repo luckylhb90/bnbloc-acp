@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -462,7 +463,13 @@ func TestTerminalsNeedExecute(t *testing.T) {
 	sid = h.session(ws, "runner", "terminal echo hello-world", core.SessionOptions{})
 	h.settle(ws, sid)
 	got := h.lastText(ws, sid)
-	if !strings.Contains(got, `"exitCode":0`) || !strings.Contains(got, `"output":"orld\n"`) || !strings.Contains(got, `"truncated":true`) {
+	// The last 5 bytes of the output: "orld\n", or "rld\r\n" where the shell
+	// ends lines with CRLF (Windows).
+	want := `"output":"orld\n"`
+	if runtime.GOOS == "windows" {
+		want = `"output":"rld\r\n"`
+	}
+	if !strings.Contains(got, `"exitCode":0`) || !strings.Contains(got, want) || !strings.Contains(got, `"truncated":true`) {
 		t.Fatalf("terminal = %s", got)
 	}
 }

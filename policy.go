@@ -52,11 +52,11 @@ func (p policy) decidePermission(ws workspaceRoot, req acpRequestPermissionReque
 		if !approve {
 			break
 		}
-		path := loc.Path
-		if !filepath.IsAbs(path) {
-			path = filepath.Join(ws.dir, path)
+		path, err := ws.agentPath(loc.Path)
+		if err == nil {
+			_, err = ws.resolve(path)
 		}
-		if _, err := ws.resolve(path); err != nil {
+		if err != nil {
 			approve, why = false, err.Error()
 		}
 	}
@@ -90,6 +90,22 @@ func newWorkspaceRoot(dir string) (workspaceRoot, error) {
 }
 
 var errOutsideWorkspace = errors.New("path is outside the session workspace")
+
+// agentPath turns a path the agent names into an absolute one: absolute paths
+// as they are, relative ones against the workspace. A path that is neither
+// (Windows: rooted "\\x" or "/x" on the current drive, or drive-relative "C:x")
+// is refused: the agent would resolve it against its own current drive or
+// directory, not the workspace, so joining it would approve a path outside
+// the workspace.
+func (w workspaceRoot) agentPath(path string) (string, error) {
+	if filepath.IsAbs(path) {
+		return path, nil
+	}
+	if filepath.VolumeName(path) != "" || strings.HasPrefix(path, "/") || strings.HasPrefix(path, `\`) {
+		return "", fmt.Errorf("path %q is not absolute", path)
+	}
+	return filepath.Join(w.dir, path), nil
+}
 
 // resolve returns the real path of an absolute path, refusing anything that
 // resolves outside the workspace (symlinks followed for the part that

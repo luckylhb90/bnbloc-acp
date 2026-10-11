@@ -1,0 +1,31 @@
+{
+  "idleTimeout": "30m",
+  "agents": [
+    {
+      "name": "claude",
+      "command": "npx",
+      "args": ["-y", "@agentclientprotocol/claude-agent-acp"]
+    },
+    {
+      "name": "codex",
+      "command": "npx",
+      "args": ["-y", "@agentclientprotocol/codex-acp"]
+    },
+    {
+      "name": "gemini",
+      "command": "gemini",
+      "args": ["--acp"]
+    },
+    {
+      "name": "qwen",
+      "command": "qwen",
+      "args": ["--acp"]
+    },
+    {
+      "name": "opencode",
+      "command": "opencode",
+      "args": ["acp"],
+      "permissions": { "allow": ["read", "search", "think", "edit", "delete", "move", "execute"] }
+    }
+  ]
+}

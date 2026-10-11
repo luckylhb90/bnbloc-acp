@@ -95,8 +95,10 @@ The adapter answers the agent's requests:
 The policy covers what the agent asks the client for. An agent acting through
 its own built-in tools follows its own approval settings: tighten those with
 the agent's `env`, `args` or `mode`. For the same reason `bnbloc-acp` does not
-advertise bnbloc's microVM `sandboxExec`, and sandboxed (borrowed) drives are
-refused rather than run on the host.
+advertise bnbloc's microVM `sandboxExec`: its agents run on the host. A
+teammate borrowing your ACP agent therefore runs on your machine under this
+policy, unless the organization requires the sandbox for borrowed runs
+(then such borrows are refused).
 
 ## Install into bnbloc
 

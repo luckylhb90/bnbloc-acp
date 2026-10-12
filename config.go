@@ -42,6 +42,9 @@ type AgentConfig struct {
 	Models      []string    `json:"models,omitempty"`
 	ModelArgs   []string    `json:"modelArgs,omitempty"`
 	Permissions Permissions `json:"permissions,omitempty"`
+	// Profile maps a session's agent profile (an expert's instructions,
+	// skills, MCP servers) onto this agent; nil = defaultProfileConfig.
+	Profile *ProfileConfig `json:"profile,omitempty"`
 }
 
 // Permissions is the agent's request policy (policy.go).
@@ -129,6 +132,11 @@ func (c *Config) validate() error {
 			var list []json.RawMessage
 			if json.Unmarshal(a.McpServers, &list) != nil {
 				return fmt.Errorf("agent %q: mcpServers must be a JSON array", a.Name)
+			}
+		}
+		if a.Profile != nil {
+			if err := a.effectiveProfileConfig().validate(); err != nil {
+				return fmt.Errorf("agent %q: %w", a.Name, err)
 			}
 		}
 		for _, k := range a.Permissions.Allow {

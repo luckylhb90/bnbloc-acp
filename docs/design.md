@@ -114,7 +114,8 @@ member's environment.
 | `GET .../messages` | completed assistant messages, aggregated from `session/update` (below). |
 | `GET .../latest` | the most recently created session of the workspace. |
 | `POST .../interrupt` | `session/cancel` for the running turn; queued input is dropped. |
-| `PUT /workspaces/{ws}/files/{path}` | the bridge's `.room/` context (writes outside `.room/` are refused). |
+| `PUT /workspaces/{ws}/files/{path}` | the bridge's `.room/` context and the agent-config paths (`CLAUDE.md`, `AGENTS.md`, `.claude/skills/`, `.agents/skills/`, `.opencode/`, `.mcp.json`); any other path is refused. |
+| `POST /workspaces/{ws}/sessions` `profile` | capability `agentProfile`: mapped per agent by its `profile` block (README "Experts and skills"). |
 | `GET .../files`, `GET /workspaces/{ws}/files/{path}` | the workspace's deliverables. |
 | `DELETE /workspaces/{ws}` | stop its sessions' agents, remove the directory. |
 

@@ -20,6 +20,7 @@ import (
 //	ACP_FAKE_AUTH=<id>  session/new fails with auth-required until authenticate(<id>)
 //	ACP_FAKE_NO_MODELS=1  no config options
 //	ACP_FAKE_DIE=1      print to stderr and exit before answering anything
+//	ACP_FAKE_MCP_HTTP=1 mcpCapabilities.http (and .sse)
 func TestMain(m *testing.M) {
 	if os.Getenv("ACP_FAKE_AGENT") == "1" {
 		if os.Getenv("ACP_FAKE_DIE") == "1" {
@@ -50,6 +51,10 @@ type fakeAgent struct {
 	costUSD  float64
 	turns    int
 	sessions int
+	// lastMeta / lastMcp are the _meta and mcpServers of the last
+	// session/new, session/resume or session/load.
+	lastMeta json.RawMessage
+	lastMcp  json.RawMessage
 }
 
 func (f *fakeAgent) serve() {
@@ -150,9 +155,19 @@ func (f *fakeAgent) configOptions() any {
 func (f *fakeAgent) request(id json.RawMessage, method string, params json.RawMessage) {
 	var p map[string]any
 	_ = json.Unmarshal(params, &p)
+	if method == "session/new" || method == "session/resume" || method == "session/load" {
+		var raw map[string]json.RawMessage
+		_ = json.Unmarshal(params, &raw)
+		f.mu.Lock()
+		f.lastMeta, f.lastMcp = raw["_meta"], raw["mcpServers"]
+		f.mu.Unlock()
+	}
 	switch method {
 	case "initialize":
 		caps := map[string]any{"loadSession": os.Getenv("ACP_FAKE_LOAD") == "1", "sessionCapabilities": map[string]any{}}
+		if os.Getenv("ACP_FAKE_MCP_HTTP") == "1" {
+			caps["mcpCapabilities"] = map[string]any{"http": true, "sse": true}
+		}
 		if os.Getenv("ACP_FAKE_RESUME") == "1" {
 			caps["sessionCapabilities"] = map[string]any{"resume": map[string]any{}}
 		}
@@ -272,6 +287,18 @@ func (f *fakeAgent) prompt(id json.RawMessage, p map[string]any) {
 		os.Exit(3)
 	case "whoami":
 		f.text(whoami, "")
+		end("end_turn")
+	case "profile":
+		// profile NAME,NAME: the session's _meta, mcpServers and the named env.
+		f.mu.Lock()
+		out := "meta=" + compact(f.lastMeta) + " mcp=" + compact(f.lastMcp)
+		f.mu.Unlock()
+		for _, name := range strings.Split(arg, ",") {
+			if name != "" {
+				out += " " + name + "=" + os.Getenv(name)
+			}
+		}
+		f.text(out, "")
 		end("end_turn")
 	case "permission":
 		kind, path, _ := strings.Cut(arg, " ")

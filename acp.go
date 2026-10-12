@@ -78,7 +78,11 @@ type acpInitializeRequest struct {
 type acpInitializeResponse struct {
 	ProtocolVersion   int `json:"protocolVersion"`
 	AgentCapabilities struct {
-		LoadSession         bool `json:"loadSession"`
+		LoadSession     bool `json:"loadSession"`
+		McpCapabilities struct {
+			HTTP bool `json:"http"`
+			SSE  bool `json:"sse"`
+		} `json:"mcpCapabilities"`
 		SessionCapabilities struct {
 			Resume json.RawMessage `json:"resume"`
 		} `json:"sessionCapabilities"`
@@ -96,9 +100,12 @@ type acpAuthenticateRequest struct {
 	MethodID string `json:"methodId"`
 }
 
+// acpNewSessionRequest is the session/new body. Meta carries the profile's
+// system-prompt append for agents mapped with instructionsVia "meta".
 type acpNewSessionRequest struct {
 	Cwd        string          `json:"cwd"`
 	McpServers json.RawMessage `json:"mcpServers"`
+	Meta       json.RawMessage `json:"_meta,omitempty"`
 }
 
 // acpContinueSessionRequest is the session/resume and session/load body.
@@ -106,6 +113,7 @@ type acpContinueSessionRequest struct {
 	SessionID  string          `json:"sessionId"`
 	Cwd        string          `json:"cwd"`
 	McpServers json.RawMessage `json:"mcpServers"`
+	Meta       json.RawMessage `json:"_meta,omitempty"`
 }
 
 type acpModeState struct {

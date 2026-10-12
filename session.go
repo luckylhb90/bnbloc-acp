@@ -43,11 +43,14 @@ type session struct {
 	workspaceID string
 	ws          workspaceRoot
 	agent       AgentConfig
-	pol         policy
-	reg         *registry
-	createdAt   time.Time
-	ctx         context.Context
-	cancelCtx   context.CancelFunc
+	// profile is the role the session wears (nil = none), kept in memory so
+	// a continued session re-applies it.
+	profile   *profile
+	pol       policy
+	reg       *registry
+	createdAt time.Time
+	ctx       context.Context
+	cancelCtx context.CancelFunc
 
 	mu        sync.Mutex
 	proc      *agentProc
@@ -104,12 +107,21 @@ func (s *session) open(ctx context.Context, prompt string, opts protocol.Session
 	}
 	hctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
-	proc, err := startAgent(hctx, s.agent, s.agent.spawnArgs(s.spawnModel), s.ws.dir, s)
+	pc := s.agent.effectiveProfileConfig()
+	if err := s.profile.materialize(s.ws, pc); err != nil {
+		return fmt.Errorf("profile: %w", err)
+	}
+	proc, err := startAgent(hctx, s.agent, s.agent.spawnArgs(s.spawnModel), s.ws.dir, s, s.profile.environ(pc)...)
 	if err != nil {
 		return err
 	}
+	servers, err := s.profile.mcpServers(s.agent, proc.init)
+	if err != nil {
+		proc.stop()
+		return err
+	}
 	var resp acpSessionResponse
-	if err := proc.call(hctx, methodSessionNew, acpNewSessionRequest{Cwd: s.ws.dir, McpServers: s.agent.mcpServers()}, &resp); err != nil {
+	if err := proc.call(hctx, methodSessionNew, acpNewSessionRequest{Cwd: s.ws.dir, McpServers: servers, Meta: s.profile.meta(pc)}, &resp); err != nil {
 		err = proc.diagnose(err)
 		proc.stop()
 		return fmt.Errorf("session/new: %w", err)
@@ -366,12 +378,26 @@ func (s *session) ensureProc() (*agentProc, error) {
 	}
 	ctx, cancel := context.WithTimeout(s.ctx, handshakeTimeout)
 	defer cancel()
-	proc, err := startAgent(ctx, s.agent, s.agent.spawnArgs(s.spawnModel), s.ws.dir, s)
+	// The continued session wears the same profile: its files are written
+	// again (the workspace may have changed meanwhile) and its env, MCP
+	// servers and system-prompt append go to the new process.
+	pc := s.agent.effectiveProfileConfig()
+	if err := s.profile.materialize(s.ws, pc); err != nil {
+		s.markLost()
+		return nil, fmt.Errorf("profile: %w", err)
+	}
+	proc, err := startAgent(ctx, s.agent, s.agent.spawnArgs(s.spawnModel), s.ws.dir, s, s.profile.environ(pc)...)
 	if err != nil {
 		s.markLost()
 		return nil, err
 	}
-	req := acpContinueSessionRequest{SessionID: s.acpID, Cwd: s.ws.dir, McpServers: s.agent.mcpServers()}
+	servers, err := s.profile.mcpServers(s.agent, proc.init)
+	if err != nil {
+		proc.stop()
+		s.markLost()
+		return nil, err
+	}
+	req := acpContinueSessionRequest{SessionID: s.acpID, Cwd: s.ws.dir, McpServers: servers, Meta: s.profile.meta(pc)}
 	var resp acpSessionResponse
 	if resumable {
 		err = proc.call(ctx, methodSessionResume, req, &resp)

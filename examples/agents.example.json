@@ -4,12 +4,14 @@
     {
       "name": "claude",
       "command": "npx",
-      "args": ["-y", "@agentclientprotocol/claude-agent-acp"]
+      "args": ["-y", "@agentclientprotocol/claude-agent-acp"],
+      "profile": { "instructionsVia": "meta", "skillsDir": ".claude/skills" }
     },
     {
       "name": "codex",
       "command": "npx",
-      "args": ["-y", "@agentclientprotocol/codex-acp"]
+      "args": ["-y", "@agentclientprotocol/codex-acp"],
+      "profile": { "instructionsVia": "file:AGENTS.md", "skillsDir": ".agents/skills" }
     },
     {
       "name": "gemini",
@@ -25,7 +27,8 @@
       "name": "opencode",
       "command": "opencode",
       "args": ["acp"],
-      "permissions": { "allow": ["read", "search", "think", "edit", "delete", "move", "execute"] }
+      "permissions": { "allow": ["read", "search", "think", "edit", "delete", "move", "execute"] },
+      "profile": { "instructionsVia": "file:AGENTS.md", "skillsDir": ".opencode/skills", "mcp": true }
     }
   ]
 }

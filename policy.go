@@ -54,7 +54,11 @@ func (p policy) decidePermission(ws workspaceRoot, req acpRequestPermissionReque
 		}
 		path, err := ws.agentPath(loc.Path)
 		if err == nil {
-			_, err = ws.resolve(path)
+			if writeKinds[req.ToolCall.Kind] {
+				_, err = ws.resolveWritable(path)
+			} else {
+				_, err = ws.resolve(path)
+			}
 		}
 		if err != nil {
 			approve, why = false, err.Error()
@@ -73,6 +77,10 @@ func (p policy) decidePermission(ws workspaceRoot, req acpRequestPermissionReque
 	}
 	return acpPermissionOutcome{Outcome: "cancelled"}, why
 }
+
+// writeKinds are the tool kinds that change files: their locations must be
+// writable (not .room/, not an agent-config path).
+var writeKinds = map[string]bool{"edit": true, "delete": true, "move": true}
 
 // workspaceRoot is one session workspace: the directory the agent runs in
 // (dir) and its symlink-resolved form (real) every containment check uses.
@@ -139,7 +147,8 @@ func (w workspaceRoot) resolve(path string) (string, error) {
 }
 
 // resolveWritable is resolve for a write: the bridge's .room/ context record
-// is read-only to the agent.
+// and the agent-config files (the session's role: instructions, skills, MCP
+// config) are read-only to the agent.
 func (w workspaceRoot) resolveWritable(path string) (string, error) {
 	real, err := w.resolve(path)
 	if err != nil {
@@ -147,6 +156,9 @@ func (w workspaceRoot) resolveWritable(path string) (string, error) {
 	}
 	if within(filepath.Join(w.real, roomDir), real) {
 		return "", errors.New("the .room/ context is read-only")
+	}
+	if rel, err := filepath.Rel(w.real, real); err == nil && isAgentConfigPath(filepath.ToSlash(rel)) {
+		return "", errors.New("the agent configuration files are read-only")
 	}
 	return real, nil
 }

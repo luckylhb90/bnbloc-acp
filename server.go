@@ -28,12 +28,12 @@ const adapterVersion = "0.1.0"
 const maxBodyBytes = 32 << 20
 
 // capabilities are the optional Core Protocol capabilities the adapter
-// serves. Not sandboxExec: an ACP agent may run shell commands itself rather
+// serves; agentProfile is mapped per agent (profile.go). Not sandboxExec: an ACP agent may run shell commands itself rather
 // than through client terminals, so the adapter cannot route every command
 // into a sandbox space (docs/prd/2026-10-11-acp-core.md "Sandbox").
 var capabilities = []string{
 	protocol.CapabilityInterrupt, protocol.CapabilityWriteFile, protocol.CapabilityDeleteWorkspace,
-	protocol.CapabilitySessionFiles, protocol.CapabilitySessionFileBytes,
+	protocol.CapabilitySessionFiles, protocol.CapabilitySessionFileBytes, capabilityAgentProfile,
 }
 
 // adapter serves Core Protocol v1 over the configured ACP agents.
@@ -185,7 +185,7 @@ func (a *adapter) writeFile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := ws.writeRoomFile(r.PathValue("path"), content); err != nil {
+	if err := ws.writeWorkspaceFile(r.PathValue("path"), content); err != nil {
 		if errors.Is(err, errBadPath) || errors.Is(err, errOutsideWorkspace) {
 			writeErr(w, errf(http.StatusBadRequest, protocol.ErrorBadRequest, err.Error()))
 			return
@@ -226,13 +226,23 @@ func (a *adapter) createSession(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, wsNotFound())
 		return
 	}
+	raw, aerr := readBody(r)
+	if aerr != nil {
+		writeErr(w, aerr)
+		return
+	}
 	var req protocol.CreateSessionRequest
-	if err := decodeBody(r, &req); err != nil {
+	if err := decodeRaw(raw, &req); err != nil {
 		writeErr(w, err)
 		return
 	}
 	if req.Execution != nil {
 		writeErr(w, errf(http.StatusBadRequest, protocol.ErrorBadRequest, "this core does not support sandbox execution"))
+		return
+	}
+	prof, err := decodeProfile(raw)
+	if err != nil {
+		writeErr(w, errf(http.StatusBadRequest, protocol.ErrorBadRequest, err.Error()))
 		return
 	}
 	agent, aerr := a.pickAgent(req.TargetID)
@@ -241,9 +251,10 @@ func (a *adapter) createSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s := newSession(newID("s-"), wsID, ws, agent, a.reg)
+	s.profile = prof
 	if err := s.open(r.Context(), req.Prompt, req.Options); err != nil {
 		slog.Warn("bnbloc-acp session start failed", "agent", agent.Name, "error", err)
-		if errors.Is(err, errSessionOption) {
+		if errors.Is(err, errSessionOption) || errors.Is(err, errMcpClash) || errors.Is(err, errBadPath) || errors.Is(err, errOutsideWorkspace) {
 			writeErr(w, errf(http.StatusBadRequest, protocol.ErrorBadRequest, agent.Name+": "+err.Error()))
 			return
 		}
@@ -440,13 +451,26 @@ func newID(prefix string) string {
 }
 
 func decodeBody(r *http.Request, out any) *apiError {
+	raw, aerr := readBody(r)
+	if aerr != nil {
+		return aerr
+	}
+	return decodeRaw(raw, out)
+}
+
+// readBody reads a bounded request body.
+func readBody(r *http.Request) ([]byte, *apiError) {
 	raw, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
 	if err != nil {
-		return errf(http.StatusBadRequest, protocol.ErrorBadRequest, "read body: "+err.Error())
+		return nil, errf(http.StatusBadRequest, protocol.ErrorBadRequest, "read body: "+err.Error())
 	}
 	if len(raw) > maxBodyBytes {
-		return errf(http.StatusRequestEntityTooLarge, protocol.ErrorBadRequest, "request body too large")
+		return nil, errf(http.StatusRequestEntityTooLarge, protocol.ErrorBadRequest, "request body too large")
 	}
+	return raw, nil
+}
+
+func decodeRaw(raw []byte, out any) *apiError {
 	if len(strings.TrimSpace(string(raw))) == 0 {
 		return nil
 	}

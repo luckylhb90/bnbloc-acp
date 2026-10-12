@@ -35,14 +35,14 @@ type agentProc struct {
 // client fs and terminal methods the policy answers) and, when configured,
 // authenticate, within ctx's deadline. h receives everything the agent sends
 // the client.
-func startAgent(ctx context.Context, a AgentConfig, args []string, dir string, h rpcHandler) (*agentProc, error) {
+func startAgent(ctx context.Context, a AgentConfig, args []string, dir string, h rpcHandler, extraEnv ...string) (*agentProc, error) {
 	path, err := exec.LookPath(a.Command)
 	if err != nil {
 		return nil, fmt.Errorf("command %q not found: %w", a.Command, err)
 	}
 	cmd := exec.Command(path, args...)
 	cmd.Dir = dir
-	cmd.Env = a.environ()
+	cmd.Env = a.environ(extraEnv...)
 	ownProcessGroup(cmd)
 	// Plain os.Pipes (not cmd.*Pipe) so cmd.Wait never closes the read end
 	// before the connection drained it.

@@ -49,6 +49,7 @@ Each agent uses its own sign-in (log in to Claude Code, Codex, … as usual).
 | `authMethod` | An ACP auth method passed to `authenticate` first, for agents that require it. |
 | `mode` | An ACP session mode applied to every session. |
 | `mcpServers` | MCP servers passed to every session. |
+| `profile` | How a session's expert profile maps onto this agent (below). |
 | `models`, `modelArgs` | A model catalog and the spawn args applying it, only for an agent that reports no model selector. |
 | `permissions.allow` | Tool kinds the adapter approves (below). |
 | `idleTimeout` | Stop an idle session's process after this long (it resumes on the next message). |
@@ -77,6 +78,54 @@ the reason and offers no target; nothing else breaks.
   the same session on the next message when the agent supports
   `session/resume` or `session/load`.
 
+## Experts and skills (agent profiles)
+
+`bnbloc-acp` advertises bnbloc's `agentProfile` capability: when a room runs
+an expert, the session arrives with a profile (the expert's instructions,
+its skills, MCP servers and their env) and the adapter maps it onto the
+agent natively. The agent's own configuration (its global settings, skills
+and sign-in) still loads alongside: an expert adds a role, it does not
+replace the member's setup.
+
+Per agent, the `profile` block says how:
+
+| Field | Meaning |
+|---|---|
+| `instructionsVia` | `meta`: ACP `session/new` `_meta.systemPrompt.append` (agents built on the Claude Agent SDK read it). `env:<NAME>`: the instructions in the agent process env var `NAME`. `file:<path>`: written into the session workspace at `<path>`, e.g. `AGENTS.md` or `CLAUDE.md`. |
+| `skillsDir` | Where skills are written: `<skillsDir>/<name>/SKILL.md` plus the skill's other files, e.g. `.claude/skills`, `.agents/skills`, `.opencode/skills`. |
+| `mcp` | Pass the profile's MCP servers to the agent (default `true`). |
+
+An agent without a `profile` block gets `{"instructionsVia": "file:AGENTS.md",
+"skillsDir": ".agents/skills"}` (the cross-agent instructions file and skills
+directory). Mappings known to work:
+
+| Agent | `instructionsVia` | `skillsDir` |
+|---|---|---|
+| Claude Code | `meta` (or `file:CLAUDE.md`) | `.claude/skills` |
+| Codex | `file:AGENTS.md` | `.agents/skills` |
+| OpenCode | `file:AGENTS.md` | `.opencode/skills` |
+
+- **Files** go only to the agent-config paths of the session workspace
+  (`CLAUDE.md`, `AGENTS.md`, `.claude/skills/`, `.agents/skills/`,
+  `.opencode/`, `.mcp.json`). The workspace is bnbloc's, never the member's
+  repository. These files are never listed as deliverables, and they are
+  read-only to the agent (it cannot rewrite its role mid-turn).
+- **Env:** every bnbloc session runs in its own agent process, so the
+  profile's env (and `env:<NAME>` instructions) is set when that process
+  starts, and again when an idle session continues in a new process.
+- **MCP servers** are added to the agent's configured `mcpServers`. An http or
+  sse server goes only to an agent whose `initialize` reports
+  `mcpCapabilities.http` / `.sse`; otherwise it is dropped with a warning
+  naming the server. A profile server with the same name as a configured one
+  is refused (the session fails with a bad request) rather than silently
+  replacing either.
+- **Secrets** (env values, MCP header and env values) are never logged and
+  never written to disk; they live only in the session's memory and the agent
+  process environment.
+- **Resume:** a session continued after an idle stop wears the same profile:
+  its files are written again and its env, `_meta` and MCP servers reach the
+  new process.
+
 ## Permission policy
 
 The adapter answers the agent's requests:
@@ -86,7 +135,8 @@ The adapter answers the agent's requests:
   `move`; `"*"` allows all) **and** every path it names is inside the
   workspace. `execute` and `fetch` are off unless you add them.
 - `fs/read_text_file` and `fs/write_text_file` are confined to the workspace
-  (symlinks resolved); `.room/` (the room's shared context) is read-only.
+  (symlinks resolved); `.room/` (the room's shared context) and the
+  agent-config files of the session's profile are read-only.
 - `terminal/*` needs `execute` and a working directory inside the workspace.
 - A turn that ends without a reply after a refusal fails with the reason, so
   the room sees why.

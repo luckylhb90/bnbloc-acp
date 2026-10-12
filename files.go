@@ -102,15 +102,25 @@ func relPath(p string) (string, error) {
 	return filepath.FromSlash(clean), nil
 }
 
-// writeRoomFile writes the bridge's room-context file; only the .room/
-// subtree is writable this way.
-func (ws workspaceRoot) writeRoomFile(rel string, content []byte) error {
+// writeWorkspaceFile writes a bnbloc-owned workspace file (Core Protocol
+// writeFile): the bridge's room context under .room/ or an agent-config
+// file (workspaceFileAllowed, the bnbloc WorkspaceFileWriter contract).
+func (ws workspaceRoot) writeWorkspaceFile(rel string, content []byte) error {
+	if _, err := relPath(rel); err != nil {
+		return err
+	}
+	if !workspaceFileAllowed(rel) {
+		return fmt.Errorf("%w: workspace files live under %s/ or the agent-config paths (%s)", errBadPath, roomDir, strings.Join(agentConfigPaths, ", "))
+	}
+	return ws.writeAllowed(rel, content)
+}
+
+// writeAllowed writes a path already checked against workspaceFileAllowed,
+// refusing one that resolves outside the workspace.
+func (ws workspaceRoot) writeAllowed(rel string, content []byte) error {
 	p, err := relPath(rel)
 	if err != nil {
 		return err
-	}
-	if !within(roomDir, p) {
-		return fmt.Errorf("%w: room context files live under %s/", errBadPath, roomDir)
 	}
 	target, err := ws.resolve(filepath.Join(ws.dir, p))
 	if err != nil {
@@ -123,8 +133,8 @@ func (ws workspaceRoot) writeRoomFile(rel string, content []byte) error {
 }
 
 // listFiles lists the workspace's deliverables: regular files only (no
-// symlinks), hidden and dependency trees skipped, capped at
-// protocol.MaxSessionFiles.
+// symlinks), hidden and dependency trees and the agent-config files skipped,
+// capped at protocol.MaxSessionFiles.
 func (ws workspaceRoot) listFiles() ([]protocol.SessionFile, bool, error) {
 	files := []protocol.SessionFile{}
 	truncated := false
@@ -154,7 +164,7 @@ func (ws workspaceRoot) listFiles() ([]protocol.SessionFile, bool, error) {
 			return nil
 		}
 		rel, err := filepath.Rel(ws.real, p)
-		if err != nil {
+		if err != nil || isAgentConfigPath(filepath.ToSlash(rel)) {
 			return nil
 		}
 		files = append(files, protocol.SessionFile{Path: filepath.ToSlash(rel), SizeBytes: info.Size(), ModTimeMs: info.ModTime().UnixMilli()})

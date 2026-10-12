@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/luckylhb90/bnbloc/core"
 	"github.com/luckylhb90/bnbloc/core/protocol"
 )
 
@@ -45,23 +46,14 @@ type agentStatus struct {
 
 // mcpTransports reads an agent's MCP transports from its initialize answer.
 func mcpTransports(init acpInitializeResponse) []string {
-	out := []string{mcpStdio}
+	out := []string{core.MCPStdio}
 	if init.AgentCapabilities.McpCapabilities.HTTP {
-		out = append(out, mcpHTTP)
+		out = append(out, core.MCPHTTP)
 	}
 	if init.AgentCapabilities.McpCapabilities.SSE {
-		out = append(out, mcpSSE)
+		out = append(out, core.MCPSSE)
 	}
 	return out
-}
-
-// acpTarget is a Core Protocol target plus mcpTransports, which mirrors
-// bnbloc's protocol.Target.MCPTransports (wire "mcpTransports"; empty =
-// stdio only). The pinned bnbloc dependency predates the field: drop this
-// type for protocol.Target on the next dependency bump.
-type acpTarget struct {
-	protocol.Target
-	MCPTransports []string `json:"mcpTransports,omitempty"`
 }
 
 // registry holds the agent config (re-read when the file changes) and each
@@ -282,22 +274,22 @@ func (r *registry) statuses() []agentStatus {
 // targets are the available agents, in config order. A target is listed only
 // once its agent was probed (initialize answered), so its MCP transports are
 // always known.
-func (r *registry) targets() []acpTarget {
+func (r *registry) targets() []protocol.Target {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := []acpTarget{}
+	out := []protocol.Target{}
 	for _, a := range r.cfg.Agents {
 		st, ok := r.status[a.Name]
 		if !ok || !st.Available {
 			continue
 		}
-		t := protocol.Target{ID: a.Name, Provider: a.Name, ReasoningEfforts: st.ReasoningEfforts, DefaultReasoning: st.DefaultReasoning}
+		t := protocol.Target{ID: a.Name, Provider: a.Name, ReasoningEfforts: st.ReasoningEfforts, DefaultReasoning: st.DefaultReasoning, MCPTransports: st.MCPTransports}
 		if st.ModelSelector {
 			t.Models, t.DefaultModel = st.Models, st.DefaultModel
 		} else if len(a.Models) > 0 {
 			t.Models = a.Models
 		}
-		out = append(out, acpTarget{Target: t, MCPTransports: st.MCPTransports})
+		out = append(out, t)
 	}
 	return out
 }

@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/luckylhb90/bnbloc/core"
 	"github.com/luckylhb90/bnbloc/core/protocol"
 )
 
@@ -45,7 +46,7 @@ type session struct {
 	agent       AgentConfig
 	// profile is the role the session wears (nil = none), kept in memory so
 	// a continued session re-applies it.
-	profile   *profile
+	profile   *core.AgentProfile
 	pol       policy
 	reg       *registry
 	createdAt time.Time
@@ -108,20 +109,20 @@ func (s *session) open(ctx context.Context, prompt string, opts protocol.Session
 	hctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
 	pc := s.agent.effectiveProfileConfig()
-	if err := s.profile.materialize(s.ws, pc); err != nil {
+	if err := materializeProfile(s.profile, s.ws, pc); err != nil {
 		return fmt.Errorf("profile: %w", err)
 	}
-	proc, err := startAgent(hctx, s.agent, s.agent.spawnArgs(s.spawnModel), s.ws.dir, s, s.profile.environ(pc)...)
+	proc, err := startAgent(hctx, s.agent, s.agent.spawnArgs(s.spawnModel), s.ws.dir, s, profileEnviron(s.profile, pc)...)
 	if err != nil {
 		return err
 	}
-	servers, err := s.profile.mcpServers(s.agent, proc.init)
+	servers, err := profileMCPServers(s.profile, s.agent, proc.init)
 	if err != nil {
 		proc.stop()
 		return err
 	}
 	var resp acpSessionResponse
-	if err := proc.call(hctx, methodSessionNew, acpNewSessionRequest{Cwd: s.ws.dir, McpServers: servers, Meta: s.profile.meta(pc)}, &resp); err != nil {
+	if err := proc.call(hctx, methodSessionNew, acpNewSessionRequest{Cwd: s.ws.dir, McpServers: servers, Meta: profileMeta(s.profile, pc)}, &resp); err != nil {
 		err = proc.diagnose(err)
 		proc.stop()
 		return fmt.Errorf("session/new: %w", err)
@@ -382,22 +383,22 @@ func (s *session) ensureProc() (*agentProc, error) {
 	// again (the workspace may have changed meanwhile) and its env, MCP
 	// servers and system-prompt append go to the new process.
 	pc := s.agent.effectiveProfileConfig()
-	if err := s.profile.materialize(s.ws, pc); err != nil {
+	if err := materializeProfile(s.profile, s.ws, pc); err != nil {
 		s.markLost()
 		return nil, fmt.Errorf("profile: %w", err)
 	}
-	proc, err := startAgent(ctx, s.agent, s.agent.spawnArgs(s.spawnModel), s.ws.dir, s, s.profile.environ(pc)...)
+	proc, err := startAgent(ctx, s.agent, s.agent.spawnArgs(s.spawnModel), s.ws.dir, s, profileEnviron(s.profile, pc)...)
 	if err != nil {
 		s.markLost()
 		return nil, err
 	}
-	servers, err := s.profile.mcpServers(s.agent, proc.init)
+	servers, err := profileMCPServers(s.profile, s.agent, proc.init)
 	if err != nil {
 		proc.stop()
 		s.markLost()
 		return nil, err
 	}
-	req := acpContinueSessionRequest{SessionID: s.acpID, Cwd: s.ws.dir, McpServers: servers, Meta: s.profile.meta(pc)}
+	req := acpContinueSessionRequest{SessionID: s.acpID, Cwd: s.ws.dir, McpServers: servers, Meta: profileMeta(s.profile, pc)}
 	var resp acpSessionResponse
 	if resumable {
 		err = proc.call(ctx, methodSessionResume, req, &resp)

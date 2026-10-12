@@ -15,8 +15,9 @@ import (
 	"github.com/luckylhb90/bnbloc/core/protocol"
 )
 
-// sessionWithProfile creates a session over the raw wire (the pinned bnbloc
-// client predates profiles) and returns its id, or the error envelope.
+// sessionWithProfile creates a session over the raw wire (so a test can send
+// shapes the typed client would never build) and returns its id, or the
+// error envelope.
 func (h *harness) sessionWithProfile(ws, target, prompt string, prof map[string]any) (string, *protocol.ProtocolError) {
 	h.t.Helper()
 	raw, _ := json.Marshal(map[string]any{"targetId": target, "prompt": prompt, "profile": prof})
@@ -55,7 +56,7 @@ func sampleWireProfile() map[string]any {
 
 func TestProfileIsAdvertised(t *testing.T) {
 	h := newHarness(t, Config{Agents: []AgentConfig{fakeAgentConfig(t, "fake", nil)}})
-	if !core.Supports(h.ctx(), h.client, h.ep, core.Capability(capabilityAgentProfile)) {
+	if !core.Supports(h.ctx(), h.client, h.ep, core.CapabilityAgentProfile) {
 		t.Fatal("agentProfile not advertised")
 	}
 }
@@ -90,7 +91,11 @@ func TestProfileConfigValidates(t *testing.T) {
 	}
 }
 
-func TestProfileDecodeRefusesUnsafeShapes(t *testing.T) {
+// A profile protocol.AgentProfile.Core refuses is a bad_request, before any
+// agent starts.
+func TestCreateSessionRefusesUnsafeProfiles(t *testing.T) {
+	h := newHarness(t, Config{Agents: []AgentConfig{fakeAgentConfig(t, "fake", nil)}})
+	ws, _ := h.workspace()
 	for name, prof := range map[string]string{
 		"escaping path":     `{"skills":[{"name":"a","files":[{"path":"../x"}]}]}`,
 		"absolute path":     `{"skills":[{"name":"a","files":[{"path":"/etc/x"}]}]}`,
@@ -107,12 +112,16 @@ func TestProfileDecodeRefusesUnsafeShapes(t *testing.T) {
 		"invalid env name":  `{"env":{"A-B":"1"}}`,
 		"leading digit env": `{"env":{"1A":"1"}}`,
 	} {
-		if _, err := decodeProfile([]byte(`{"prompt":"p","profile":` + prof + `}`)); err == nil || !errors.Is(err, errBadProfile) {
-			t.Errorf("%s: %v", name, err)
+		var m map[string]any
+		if err := json.Unmarshal([]byte(prof), &m); err != nil {
+			t.Fatal(err)
+		}
+		if _, perr := h.sessionWithProfile(ws, "fake", "p", m); perr == nil || perr.Code != protocol.ErrorBadRequest || !strings.Contains(perr.Message, "profile:") {
+			t.Errorf("%s: %+v", name, perr)
 		}
 	}
-	if p, err := decodeProfile([]byte(`{"prompt":"p"}`)); p != nil || err != nil {
-		t.Fatalf("no profile = %+v, %v", p, err)
+	if _, perr := h.sessionWithProfile(ws, "fake", "p", nil); perr != nil {
+		t.Fatalf("no profile: %+v", perr)
 	}
 }
 
@@ -325,12 +334,7 @@ func TestTargetsReportMCPTransports(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	var out struct {
-		Targets []struct {
-			ID            string   `json:"id"`
-			MCPTransports []string `json:"mcpTransports"`
-		} `json:"targets"`
-	}
+	var out protocol.ListTargetsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}

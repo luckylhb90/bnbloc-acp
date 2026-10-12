@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/luckylhb90/bnbloc/core"
 )
 
 // policy answers an agent's requests of the client. Drives are unattended,
@@ -154,17 +156,14 @@ func (w workspaceRoot) resolveWritable(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if within(filepath.Join(w.real, roomDir), real) {
+	if within(filepath.Join(w.real, core.RoomContextDir), real) {
 		return "", errors.New("the .room/ context is read-only")
 	}
-	if rel, err := filepath.Rel(w.real, real); err == nil && isAgentConfigPath(filepath.ToSlash(rel)) {
+	if rel, err := filepath.Rel(w.real, real); err == nil && core.IsAgentConfigPath(filepath.ToSlash(rel)) {
 		return "", errors.New("the agent configuration files are read-only")
 	}
 	return real, nil
 }
-
-// roomDir is the workspace subtree the bridge writes its room context into.
-const roomDir = ".room"
 
 func within(root, path string) bool {
 	if path == root {

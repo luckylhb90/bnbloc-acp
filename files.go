@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/luckylhb90/bnbloc/core"
 	"github.com/luckylhb90/bnbloc/core/protocol"
 )
 
@@ -104,18 +105,18 @@ func relPath(p string) (string, error) {
 
 // writeWorkspaceFile writes a bnbloc-owned workspace file (Core Protocol
 // writeFile): the bridge's room context under .room/ or an agent-config
-// file (workspaceFileAllowed, the bnbloc WorkspaceFileWriter contract).
+// file (core.WorkspaceFileAllowed, the bnbloc WorkspaceFileWriter contract).
 func (ws workspaceRoot) writeWorkspaceFile(rel string, content []byte) error {
 	if _, err := relPath(rel); err != nil {
 		return err
 	}
-	if !workspaceFileAllowed(rel) {
-		return fmt.Errorf("%w: workspace files live under %s/ or the agent-config paths (%s)", errBadPath, roomDir, strings.Join(agentConfigPaths, ", "))
+	if !core.WorkspaceFileAllowed(rel) {
+		return fmt.Errorf("%w: workspace files live under %s or the agent-config paths (%s)", errBadPath, core.RoomContextDir, strings.Join(core.AgentConfigPaths, ", "))
 	}
 	return ws.writeAllowed(rel, content)
 }
 
-// writeAllowed writes a path already checked against workspaceFileAllowed,
+// writeAllowed writes a path already checked against core.WorkspaceFileAllowed,
 // refusing one that resolves outside the workspace.
 func (ws workspaceRoot) writeAllowed(rel string, content []byte) error {
 	p, err := relPath(rel)
@@ -164,7 +165,7 @@ func (ws workspaceRoot) listFiles() ([]protocol.SessionFile, bool, error) {
 			return nil
 		}
 		rel, err := filepath.Rel(ws.real, p)
-		if err != nil || isAgentConfigPath(filepath.ToSlash(rel)) {
+		if err != nil || core.IsAgentConfigPath(filepath.ToSlash(rel)) {
 			return nil
 		}
 		files = append(files, protocol.SessionFile{Path: filepath.ToSlash(rel), SizeBytes: info.Size(), ModTimeMs: info.ModTime().UnixMilli()})

@@ -136,7 +136,7 @@ func (s *session) open(ctx context.Context, prompt string, opts protocol.Session
 	s.options = resp.ConfigOptions
 	s.mu.Unlock()
 	go s.watch(proc)
-	s.reg.observe(s.agent.Name, resp.ConfigOptions)
+	s.reg.observe(s.agent.Name, proc.init, resp.ConfigOptions)
 	if err := s.applyMode(hctx, proc, resp.Modes); err != nil {
 		s.close()
 		return fmt.Errorf("%w: %v", errSessionOption, err)

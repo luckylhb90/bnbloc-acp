@@ -37,7 +37,31 @@ type agentStatus struct {
 	DefaultModel     string   `json:"defaultModel,omitempty"`
 	ReasoningEfforts []string `json:"reasoningEfforts,omitempty"`
 	DefaultReasoning string   `json:"defaultReasoning,omitempty"`
-	CheckedAtMs      int64    `json:"checkedAtMs,omitempty"`
+	// MCPTransports are the MCP transports the agent accepts in a session
+	// (stdio always; http / sse per its initialize mcpCapabilities).
+	MCPTransports []string `json:"mcpTransports,omitempty"`
+	CheckedAtMs   int64    `json:"checkedAtMs,omitempty"`
+}
+
+// mcpTransports reads an agent's MCP transports from its initialize answer.
+func mcpTransports(init acpInitializeResponse) []string {
+	out := []string{mcpStdio}
+	if init.AgentCapabilities.McpCapabilities.HTTP {
+		out = append(out, mcpHTTP)
+	}
+	if init.AgentCapabilities.McpCapabilities.SSE {
+		out = append(out, mcpSSE)
+	}
+	return out
+}
+
+// acpTarget is a Core Protocol target plus mcpTransports, which mirrors
+// bnbloc's protocol.Target.MCPTransports (wire "mcpTransports"; empty =
+// stdio only). The pinned bnbloc dependency predates the field: drop this
+// type for protocol.Target on the next dependency bump.
+type acpTarget struct {
+	protocol.Target
+	MCPTransports []string `json:"mcpTransports,omitempty"`
 }
 
 // registry holds the agent config (re-read when the file changes) and each
@@ -200,6 +224,7 @@ func (r *registry) probe(ctx context.Context, a AgentConfig) agentStatus {
 		return st
 	}
 	st.Available = true
+	st.MCPTransports = mcpTransports(proc.init)
 	applyCatalog(&st, resp.ConfigOptions)
 	return st
 }
@@ -218,12 +243,12 @@ func applyCatalog(st *agentStatus, opts []acpConfigOption) {
 	}
 }
 
-// observe refreshes an agent's catalog from a live session's session/new
-// answer (the agent's defaults, before any choice was applied).
-func (r *registry) observe(name string, opts []acpConfigOption) {
+// observe refreshes an agent's catalog from a live session's initialize and
+// session/new answers (the agent's defaults, before any choice was applied).
+func (r *registry) observe(name string, init acpInitializeResponse, opts []acpConfigOption) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	st := agentStatus{Name: name, Available: true, CheckedAtMs: time.Now().UnixMilli()}
+	st := agentStatus{Name: name, Available: true, CheckedAtMs: time.Now().UnixMilli(), MCPTransports: mcpTransports(init)}
 	applyCatalog(&st, opts)
 	r.status[name] = st
 }
@@ -254,11 +279,13 @@ func (r *registry) statuses() []agentStatus {
 	return out
 }
 
-// targets are the available agents, in config order.
-func (r *registry) targets() []protocol.Target {
+// targets are the available agents, in config order. A target is listed only
+// once its agent was probed (initialize answered), so its MCP transports are
+// always known.
+func (r *registry) targets() []acpTarget {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := []protocol.Target{}
+	out := []acpTarget{}
 	for _, a := range r.cfg.Agents {
 		st, ok := r.status[a.Name]
 		if !ok || !st.Available {
@@ -270,7 +297,7 @@ func (r *registry) targets() []protocol.Target {
 		} else if len(a.Models) > 0 {
 			t.Models = a.Models
 		}
-		out = append(out, t)
+		out = append(out, acpTarget{Target: t, MCPTransports: st.MCPTransports})
 	}
 	return out
 }

@@ -312,3 +312,33 @@ func TestWorkspaceWritesWidenToAgentConfigPaths(t *testing.T) {
 		t.Fatalf("read permission on AGENTS.md = %s", got)
 	}
 }
+
+// Each target reports the MCP transports its agent accepts: stdio always,
+// http/sse from the agent's initialize mcpCapabilities.
+func TestTargetsReportMCPTransports(t *testing.T) {
+	h := newHarness(t, Config{Agents: []AgentConfig{
+		fakeAgentConfig(t, "plain", nil),
+		fakeAgentConfig(t, "web", map[string]string{"ACP_FAKE_MCP_HTTP": "1"}),
+	}})
+	resp, err := h.srv.Client().Get(h.srv.URL + protocol.PathTargets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Targets []struct {
+			ID            string   `json:"id"`
+			MCPTransports []string `json:"mcpTransports"`
+		} `json:"targets"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, tg := range out.Targets {
+		got[tg.ID] = strings.Join(tg.MCPTransports, ",")
+	}
+	if got["plain"] != "stdio" || got["web"] != "stdio,http,sse" {
+		t.Fatalf("transports = %v", got)
+	}
+}

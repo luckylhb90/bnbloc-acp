@@ -113,6 +113,11 @@ directory). Mappings known to work:
 - **Env:** every bnbloc session runs in its own agent process, so the
   profile's env (and `env:<NAME>` instructions) is set when that process
   starts, and again when an idle session continues in a new process.
+- **Transports:** each target lists the MCP transports its agent accepts
+  (`mcpTransports`: `stdio` always, plus `http` / `sse` when the agent's ACP
+  `initialize` reports `mcpCapabilities.http` / `.sse`). A target is listed
+  only after its agent answered `initialize` (the availability probe), so
+  the list is always the agent's own answer, refreshed with its catalog.
 - **MCP servers** are added to the agent's configured `mcpServers`. An http or
   sse server goes only to an agent whose `initialize` reports
   `mcpCapabilities.http` / `.sse`; otherwise it is dropped with a warning

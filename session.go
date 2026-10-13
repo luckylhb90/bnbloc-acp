@@ -35,6 +35,8 @@ var errSessionOption = errors.New("session option rejected")
 type turnInput struct {
 	text string
 	opts protocol.SessionOptions
+	// deadline is when the turn must end (zero = none given; live.go).
+	deadline time.Time
 }
 
 // session is one Core Protocol session: an ACP session in its own agent
@@ -89,6 +91,11 @@ type session struct {
 	// metadata ("" = none), and metaLastErr the last error it reported there
 	// (its cause; metaTurnState).
 	metaErr, metaLastErr string
+	// startedAt and activity are the running turn's start and latest steps
+	// (live.go); deadlineHit marks a turn cancelled at its deadline.
+	startedAt   time.Time
+	activity    []turnActivity
+	deadlineHit bool
 
 	terminals map[string]*terminal
 }
@@ -106,7 +113,8 @@ func newSession(id, workspaceID string, ws workspaceRoot, a AgentConfig, reg *re
 
 // open starts the agent and its ACP session, applies the configured mode and
 // the sender's model/reasoning, and queues the first prompt.
-func (s *session) open(ctx context.Context, prompt string, opts protocol.SessionOptions) error {
+func (s *session) open(ctx context.Context, first turnInput) error {
+	opts := first.opts
 	if s.reg.usesConfigModels(s.agent) {
 		s.spawnModel = opts.Model
 	}
@@ -150,7 +158,7 @@ func (s *session) open(ctx context.Context, prompt string, opts protocol.Session
 		s.close()
 		return fmt.Errorf("%w: %v", errSessionOption, err)
 	}
-	return s.enqueue(turnInput{text: prompt, opts: opts})
+	return s.enqueue(first)
 }
 
 // applyMode sets the agent's configured session mode: through a "mode"
@@ -269,6 +277,7 @@ func (s *session) run() {
 		s.cancelled = false
 		s.status, s.statusServed = turnStatus{}, false
 		s.turnCost, s.refused, s.metaErr, s.metaLastErr = 0, nil, "", ""
+		s.startedAt, s.activity, s.deadlineHit = time.Now(), nil, false
 		if s.cost != nil {
 			s.turnCost = s.cost.amount
 		}
@@ -280,6 +289,10 @@ func (s *session) run() {
 // turn runs one prompt to its end and records how it ended.
 func (s *session) turn(in turnInput) {
 	first := s.messageCount()
+	if !in.deadline.IsZero() {
+		stop := s.watchDeadline(in.deadline)
+		defer stop()
+	}
 	proc, err := s.ensureProc()
 	if err == nil {
 		hctx, cancel := context.WithTimeout(s.ctx, handshakeTimeout)
@@ -292,6 +305,14 @@ func (s *session) turn(in turnInput) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.deadlineHit {
+		// Out of time: what the agent was still writing is dropped, like an
+		// errored turn's (the messages it completed before stay).
+		s.discardText()
+		s.setFailed(failDeadline, deadlineMessage(s.startedAt, in.deadline))
+		slog.Warn("bnbloc-acp turn ran out of time", "agent", s.agent.Name, "session", s.id, "deadline", in.deadline)
+		return
+	}
 	cancelled := s.cancelled || resp.StopReason == stopReasonCancelled
 	if !cancelled {
 		if code, msg := turnFailure(err, resp, s.metaErr); code != "" {
@@ -323,11 +344,14 @@ func (s *session) turn(in turnInput) {
 }
 
 // turnStatus is the PollTurn answer: Core Protocol v1's PollTurnResponse plus
-// failCode, a stable machine-readable cause of a failed turn (an additive
-// field; failMessage stays the room-visible reason).
+// failCode, a stable machine-readable cause of a failed turn (failMessage
+// stays the room-visible reason), and a running turn's start and activity.
 type turnStatus struct {
 	protocol.PollTurnResponse
 	FailCode string `json:"failCode,omitempty"`
+	// StartedAtMs and Activity describe a running turn (live.go).
+	StartedAtMs int64          `json:"startedAtMs,omitempty"`
+	Activity    []turnActivity `json:"activity,omitempty"`
 }
 
 // Fail codes of a failed turn.
@@ -338,6 +362,7 @@ const (
 	failRefusal           = "refusal"            // stop reason refusal, no reply
 	failNoReply           = "no_reply"           // max_tokens / max_turn_requests, no reply
 	failPermissionRefused = "permission_refused" // the policy refused, no reply
+	failDeadline          = "deadline"           // still running at its deadline (live.go)
 )
 
 func (s *session) setFailed(code, msg string) {
@@ -562,6 +587,10 @@ func (s *session) poll() (turnStatus, bool) {
 	if st.Idle && st.Failed {
 		s.statusServed = true
 	}
+	if s.running && !s.startedAt.IsZero() {
+		st.StartedAtMs = s.startedAt.UnixMilli()
+		st.Activity = append([]turnActivity(nil), s.activity...)
+	}
 	return st, true
 }
 
@@ -605,6 +634,7 @@ func (s *session) Notify(method string, params json.RawMessage) {
 		if u.Content == nil || u.Content.Type != "text" {
 			return
 		}
+		s.noteActivity(activityText, "", "")
 		if u.MessageID != "" && s.textID != "" && u.MessageID != s.textID {
 			s.finalizeText()
 		}
@@ -614,12 +644,16 @@ func (s *session) Notify(method string, params json.RawMessage) {
 		s.text.WriteString(u.Content.Text)
 	case "agent_thought_chunk":
 		if u.Content != nil && u.Content.Type == "text" {
+			s.noteActivity(activityThinking, "", "")
 			s.finalizeText()
 			s.thinking.WriteString(u.Content.Text)
 		}
 	case "tool_call", "tool_call_update", "plan":
 		// The agent moved on: the text so far is a complete message.
 		s.finalizeText()
+		if u.SessionUpdate != "plan" {
+			s.noteActivity(activityTool, toolTitle(u), u.ToolCallID)
+		}
 	case "usage_update":
 		if u.Cost != nil {
 			s.cost = &costState{amount: u.Cost.Amount, currency: u.Cost.Currency}

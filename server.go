@@ -34,6 +34,7 @@ const maxBodyBytes = 32 << 20
 var capabilities = []string{
 	protocol.CapabilityInterrupt, protocol.CapabilityWriteFile, protocol.CapabilityDeleteWorkspace,
 	protocol.CapabilitySessionFiles, protocol.CapabilitySessionFileBytes, protocol.CapabilityAgentProfile,
+	capabilityTurnActivity,
 }
 
 // adapter serves Core Protocol v1 over the configured ACP agents.
@@ -226,7 +227,7 @@ func (a *adapter) createSession(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, wsNotFound())
 		return
 	}
-	var req protocol.CreateSessionRequest
+	var req createSessionRequest
 	if err := decodeBody(r, &req); err != nil {
 		writeErr(w, err)
 		return
@@ -247,7 +248,7 @@ func (a *adapter) createSession(w http.ResponseWriter, r *http.Request) {
 	}
 	s := newSession(newID("s-"), wsID, ws, agent, a.reg)
 	s.profile = prof
-	if err := s.open(r.Context(), req.Prompt, req.Options); err != nil {
+	if err := s.open(r.Context(), turnInput{text: req.Prompt, opts: req.Options, deadline: deadlineOf(req.DeadlineMs)}); err != nil {
 		slog.Warn("bnbloc-acp session start failed", "agent", agent.Name, "error", err)
 		if errors.Is(err, errSessionOption) || errors.Is(err, errMcpClash) || errors.Is(err, errBadPath) || errors.Is(err, errOutsideWorkspace) {
 			writeErr(w, errf(http.StatusBadRequest, protocol.ErrorBadRequest, agent.Name+": "+err.Error()))
@@ -314,7 +315,7 @@ func (a *adapter) sendInput(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, aerr)
 		return
 	}
-	var req protocol.SendInputRequest
+	var req sendInputRequest
 	if err := decodeBody(r, &req); err != nil {
 		writeErr(w, err)
 		return
@@ -323,7 +324,7 @@ func (a *adapter) sendInput(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, errf(http.StatusBadRequest, protocol.ErrorBadRequest, "this core does not support sandbox execution"))
 		return
 	}
-	if err := s.enqueue(turnInput{text: req.Text, opts: req.Options}); err != nil {
+	if err := s.enqueue(turnInput{text: req.Text, opts: req.Options, deadline: deadlineOf(req.DeadlineMs)}); err != nil {
 		writeErr(w, errf(http.StatusNotFound, protocol.ErrorSessionNotFound, err.Error()))
 		return
 	}

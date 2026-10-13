@@ -275,6 +275,21 @@ func (f *fakeAgent) prompt(id json.RawMessage, p map[string]any) {
 		f.update(map[string]any{"sessionUpdate": "agent_thought_chunk", "content": map[string]any{"type": "text", "text": "pondering"}})
 		f.text("answer", "")
 		end("end_turn")
+	case "steps":
+		// A working turn: a thought, ten tool calls (one retitled by an
+		// update, one titled only by kind and location), then text; it runs
+		// until cancelled.
+		f.update(map[string]any{"sessionUpdate": "agent_thought_chunk", "content": map[string]any{"type": "text", "text": "planning"}})
+		f.update(map[string]any{"sessionUpdate": "agent_thought_chunk", "content": map[string]any{"type": "text", "text": " more"}})
+		for i := 1; i <= 9; i++ {
+			f.update(map[string]any{"sessionUpdate": "tool_call", "toolCallId": fmt.Sprintf("c%d", i), "title": fmt.Sprintf("step %d", i), "kind": "execute", "status": "pending"})
+		}
+		f.update(map[string]any{"sessionUpdate": "tool_call_update", "toolCallId": "c9", "title": "Run python extract.py\non two lines", "status": "completed"})
+		f.update(map[string]any{"sessionUpdate": "tool_call", "toolCallId": "c10", "kind": "read", "locations": []any{map[string]any{"path": "/w/deck/template.pptx"}}, "status": "pending"})
+		f.text("writing the answer", "")
+		f.text(" now", "")
+		<-cancel
+		f.reply(id, map[string]any{"stopReason": "cancelled"})
 	case "slow":
 		f.text("working", "")
 		<-cancel

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +14,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/luckylhb90/bnbloc/core"
 	"github.com/luckylhb90/bnbloc/core/conformance"
@@ -723,5 +726,135 @@ func TestAgentEnvironmentNeverCarriesAdapterSettings(t *testing.T) {
 	env := strings.Join(AgentConfig{Env: map[string]string{"X": "1"}}.environ("Y=2"), "\n")
 	if strings.Contains(env, "BNBLOC_ACP_TOKEN") || !strings.Contains(env, "X=1") || !strings.Contains(env, "Y=2") {
 		t.Fatalf("environ leaked or dropped settings")
+	}
+}
+
+// rawPost sends a raw protocol request (fields newer than the typed client)
+// and returns the answer's body.
+func (h *harness) rawPost(path string, body any) []byte {
+	h.t.Helper()
+	raw, err := json.Marshal(body)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	resp, err := h.srv.Client().Post(h.srv.URL+path, "application/json", bytes.NewReader(raw))
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode/100 != 2 {
+		h.t.Fatalf("POST %s: HTTP %d %s", path, resp.StatusCode, out)
+	}
+	return out
+}
+
+// A turn still running at its deadline is cancelled and fails with the
+// deadline code; the text it was writing is dropped. A turn without one runs
+// as before, and so does the next turn after a deadline.
+func TestTurnDeadline(t *testing.T) {
+	h := newHarness(t, Config{Agents: []AgentConfig{fakeAgentConfig(t, "fake", nil)}})
+	ws, _ := h.workspace()
+	sid := h.session(ws, "fake", "hello", core.SessionOptions{})
+	h.settle(ws, sid)
+	_, before, _ := h.client.Messages(h.ctx(), h.ep, ws, sid, 0)
+
+	h.rawPost("/core/v1/workspaces/"+ws+"/sessions/"+sid+"/input", map[string]any{"text": "slow", "deadlineMs": time.Now().Add(300 * time.Millisecond).UnixMilli()})
+	ts := h.rawPoll(ws, sid)
+	if !ts.Failed || ts.FailCode != failDeadline || ts.FailMessage != "ran out of time after less than a minute" {
+		t.Fatalf("status = %+v", ts)
+	}
+	if msgs := h.messages(ws, sid, before); len(msgs) != 0 {
+		t.Fatalf("the timed-out turn served messages %q", texts(msgs))
+	}
+
+	h.rawPost("/core/v1/workspaces/"+ws+"/sessions/"+sid+"/input", map[string]any{"text": "hello", "deadlineMs": time.Now().Add(time.Minute).UnixMilli()})
+	if ts := h.rawPoll(ws, sid); ts.Failed {
+		t.Fatalf("a turn within its deadline: %+v", ts)
+	}
+	if got := h.lastText(ws, sid); got != "hello world" {
+		t.Fatalf("reply = %q", got)
+	}
+
+	// A deadline at session create.
+	var created struct {
+		SessionID string `json:"sessionId"`
+	}
+	_ = json.Unmarshal(h.rawPost("/core/v1/workspaces/"+ws+"/sessions", map[string]any{"targetId": "fake", "prompt": "slow", "deadlineMs": time.Now().Add(200 * time.Millisecond).UnixMilli()}), &created)
+	if ts := h.rawPoll(ws, created.SessionID); !ts.Failed || ts.FailCode != failDeadline {
+		t.Fatalf("create with a deadline: status = %+v", ts)
+	}
+}
+
+// A running turn reports when it started and its latest steps, oldest
+// first: a thought and text coalesce into one step each, a tool call is its
+// own step (retitled by its update, named by kind and file when untitled),
+// at most eight are kept, and the activity is gone once the turn ends.
+func TestTurnActivity(t *testing.T) {
+	h := newHarness(t, Config{Agents: []AgentConfig{fakeAgentConfig(t, "fake", nil)}})
+	ws, _ := h.workspace()
+	sid := h.session(ws, "fake", "hello", core.SessionOptions{})
+	h.settle(ws, sid)
+	start := time.Now().UnixMilli()
+	h.send(ws, sid, "steps", core.SessionOptions{})
+
+	var ts turnStatus
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		ts = h.pollNow(ws, sid)
+		if n := len(ts.Activity); n > 0 && ts.Activity[n-1].Kind == activityText {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("activity never reached the text step: %+v", ts)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if ts.Idle || ts.StartedAtMs < start {
+		t.Fatalf("running turn: idle=%v startedAtMs=%d (sent at %d)", ts.Idle, ts.StartedAtMs, start)
+	}
+	var got []string
+	for _, a := range ts.Activity {
+		got = append(got, a.Kind+":"+a.Title)
+		if a.AtMs < start {
+			t.Fatalf("step %+v older than the turn", a)
+		}
+	}
+	want := []string{"tool:step 4", "tool:step 5", "tool:step 6", "tool:step 7", "tool:step 8", "tool:Run python extract.py on two lines", "tool:read: template.pptx", "text:"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("activity = %q, want %q", got, want)
+	}
+
+	if err := h.client.Interrupt(h.ctx(), h.ep, ws, sid); err != nil {
+		t.Fatal(err)
+	}
+	if ts := h.rawPoll(ws, sid); ts.StartedAtMs != 0 || len(ts.Activity) != 0 {
+		t.Fatalf("an ended turn still reports activity: %+v", ts)
+	}
+}
+
+// pollNow reads the turn status once over the raw wire.
+func (h *harness) pollNow(ws, sid string) turnStatus {
+	h.t.Helper()
+	resp, err := h.srv.Client().Get(h.srv.URL + "/core/v1/workspaces/" + ws + "/sessions/" + sid + "/turn")
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var ts turnStatus
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&ts) != nil {
+		h.t.Fatalf("PollTurn: HTTP %d", resp.StatusCode)
+	}
+	return ts
+}
+
+// activityTitle keeps one line of at most maxActivityTitle characters.
+func TestActivityTitle(t *testing.T) {
+	if got := activityTitle("a\n  b\tc"); got != "a b c" {
+		t.Fatalf("got %q", got)
+	}
+	long := strings.Repeat("界", 200)
+	if got := activityTitle(long); utf8.RuneCountInString(got) != maxActivityTitle {
+		t.Fatalf("len = %d", utf8.RuneCountInString(got))
 	}
 }

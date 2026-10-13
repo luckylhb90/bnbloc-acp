@@ -228,11 +228,16 @@ type acpSessionNotification struct {
 type acpSessionUpdate struct {
 	SessionUpdate string `json:"sessionUpdate"`
 	// Meta is the agent's own metadata (session_info_update carries an
-	// agent's turn state there; see metaTurnError).
-	Meta          json.RawMessage   `json:"_meta"`
-	Content       *acpContentBlock  `json:"content"`
-	MessageID     string            `json:"messageId"`
-	ConfigOptions []acpConfigOption `json:"configOptions"`
+	// agent's turn state there; see metaTurnState).
+	Meta      json.RawMessage  `json:"_meta"`
+	Content   *acpContentBlock `json:"content"`
+	MessageID string           `json:"messageId"`
+	// A tool_call / tool_call_update: its id, title, kind and locations.
+	ToolCallID    string                `json:"toolCallId"`
+	Title         string                `json:"title"`
+	Kind          string                `json:"kind"`
+	Locations     []acpToolCallLocation `json:"locations"`
+	ConfigOptions []acpConfigOption     `json:"configOptions"`
 	Cost          *struct {
 		Amount   float64 `json:"amount"`
 		Currency string  `json:"currency"`

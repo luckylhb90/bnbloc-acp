@@ -78,6 +78,18 @@ the reason and offers no target; nothing else breaks.
   completed message is dropped, never served as a reply.
 - **Turns** run one at a time; input sent during a turn is queued; interrupt
   cancels the turn (`session/cancel`) and drops the queue.
+- **Deadlines:** a session create or input may carry `deadlineMs` (the
+  caller owns how long a turn may run). A turn still running then is
+  cancelled (`session/cancel`; the agent process is stopped if it has not
+  ended the turn 30 s later) and fails with `failCode` `deadline` ("ran out
+  of time after N minutes"). Without one, a turn runs as long as the agent
+  works.
+- **Live activity** (capability `turnActivity`): while a turn runs,
+  `PollTurn` reports `startedAtMs` and `activity`, its latest steps (at
+  most 8, oldest first): each tool call as `{kind: "tool", title}` (the
+  agent's title, else its kind and file name; one line, at most 120
+  characters, never contents), and the agent thinking or writing as one
+  `thinking` / `text` step each.
 - **Deliverables:** files the agent writes in the workspace appear in the room.
 - **Idle and crashes:** an idle process stops after `idleTimeout` and resumes
   the same session on the next message when the agent supports

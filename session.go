@@ -67,7 +67,7 @@ type session struct {
 	queue     []turnInput
 	running   bool
 	cancelled bool
-	status    protocol.PollTurnResponse
+	status    turnStatus
 	// statusServed: the current failed status was returned by a poll; a lost
 	// session answers session_not_found once its failure has been seen.
 	statusServed bool
@@ -263,7 +263,7 @@ func (s *session) run() {
 		in := s.queue[0]
 		s.queue = s.queue[1:]
 		s.cancelled = false
-		s.status, s.statusServed = protocol.PollTurnResponse{}, false
+		s.status, s.statusServed = turnStatus{}, false
 		s.turnCost, s.refused = 0, nil
 		if s.cost != nil {
 			s.turnCost = s.cost.amount
@@ -288,41 +288,76 @@ func (s *session) turn(in turnInput) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	finalizedAtEnd := s.finalizeText()
-	if finalizedAtEnd {
+	cancelled := s.cancelled || resp.StopReason == stopReasonCancelled
+	if !cancelled {
+		if code, msg := turnFailure(err, resp); code != "" {
+			// An errored turn is a failed turn, never a reply: the text the
+			// agent streamed since its last completed message is the failure's
+			// output, so it is dropped rather than completed (a poll never sees
+			// it as a reply, whatever order the caller reads status and
+			// messages in).
+			s.discardText()
+			s.setFailed(code, msg)
+			slog.Warn("bnbloc-acp turn failed", "agent", s.agent.Name, "session", s.id, "code", code, "error", err, "stopReason", resp.StopReason)
+			return
+		}
+	}
+	if s.finalizeText() {
 		s.msgs[len(s.msgs)-1].Metrics = s.turnMetrics(resp)
 	}
 	replied := s.version > first
 	switch {
-	case s.cancelled || resp.StopReason == stopReasonCancelled:
+	case cancelled:
 		// An interrupted turn is not a failure.
-	case err != nil:
-		s.status = protocol.PollTurnResponse{Failed: true, FailMessage: turnError(err)}
 	case resp.StopReason == stopReasonRefusal && !replied:
-		s.status = protocol.PollTurnResponse{Failed: true, FailMessage: "the agent refused to continue"}
+		s.setFailed(failRefusal, "the agent refused to continue")
 	case (resp.StopReason == stopReasonMaxTokens || resp.StopReason == stopReasonMaxTurnRequest) && !replied:
-		s.status = protocol.PollTurnResponse{Failed: true, FailMessage: "the agent stopped before replying (" + resp.StopReason + ")"}
+		s.setFailed(failNoReply, "the agent stopped before replying ("+resp.StopReason+")")
 	case len(s.refused) > 0 && !replied:
-		s.status = protocol.PollTurnResponse{Failed: true, FailMessage: "the agent stopped after this core's permission policy refused: " + strings.Join(s.refused, "; ")}
-	}
-	if err != nil && !s.cancelled {
-		slog.Warn("bnbloc-acp turn failed", "agent", s.agent.Name, "session", s.id, "error", err)
+		s.setFailed(failPermissionRefused, "the agent stopped after this core's permission policy refused: "+strings.Join(s.refused, "; "))
 	}
 }
 
-// turnError is the room-visible reason of a failed turn: the agent's own
-// JSON-RPC error message, never its stderr.
-func turnError(err error) string {
+// turnStatus is the PollTurn answer: Core Protocol v1's PollTurnResponse plus
+// failCode, a stable machine-readable cause of a failed turn (an additive
+// field; failMessage stays the room-visible reason).
+type turnStatus struct {
+	protocol.PollTurnResponse
+	FailCode string `json:"failCode,omitempty"`
+}
+
+// Fail codes of a failed turn.
+const (
+	failAgentError        = "agent_error"        // a JSON-RPC error, an error stop reason, a failed respawn
+	failAgentExited       = "agent_exited"       // the agent process exited during the turn
+	failSessionLost       = "session_lost"       // the agent can neither resume nor load the session
+	failRefusal           = "refusal"            // stop reason refusal, no reply
+	failNoReply           = "no_reply"           // max_tokens / max_turn_requests, no reply
+	failPermissionRefused = "permission_refused" // the policy refused, no reply
+)
+
+func (s *session) setFailed(code, msg string) {
+	s.status = turnStatus{PollTurnResponse: protocol.PollTurnResponse{Failed: true, FailMessage: msg}, FailCode: code}
+}
+
+// turnFailure is how an errored turn failed: its fail code and room-visible
+// reason (the agent's own JSON-RPC error message, never its stderr), or ""
+// when the turn did not error.
+func turnFailure(err error, resp acpPromptResponse) (code, msg string) {
 	var rerr *rpcError
 	switch {
+	case err == nil && resp.StopReason == stopReasonError:
+		return failAgentError, "the agent ended the turn with an error"
+	case err == nil:
+		return "", ""
 	case errors.As(err, &rerr):
-		return "the agent returned an error: " + rerr.Message
+		return failAgentError, "the agent returned an error: " + rerr.Message
 	case errors.Is(err, errAgentExited):
-		return "the agent process exited during the turn"
+		return failAgentExited, "the agent process exited during the turn"
 	case errors.Is(err, errSessionLost):
-		return errSessionLost.Error()
+		return failSessionLost, errSessionLost.Error()
 	default:
-		return err.Error()
+		return failAgentError, err.Error()
 	}
 }
 
@@ -509,12 +544,12 @@ func (s *session) idle() bool {
 
 // poll is the turn status. A lost session answers it until its failure has
 // been seen once, then reports the session gone so the caller rebinds.
-func (s *session) poll() (protocol.PollTurnResponse, bool) {
+func (s *session) poll() (turnStatus, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	busy := s.running || len(s.queue) > 0
 	if s.lost && !busy && (!s.status.Failed || s.statusServed) {
-		return protocol.PollTurnResponse{}, false
+		return turnStatus{}, false
 	}
 	st := s.status
 	st.Idle = !busy
@@ -584,6 +619,17 @@ func (s *session) Notify(method string, params json.RawMessage) {
 			s.cost = &costState{amount: u.Cost.Amount, currency: u.Cost.Currency}
 		}
 	}
+}
+
+// discardText drops the message being aggregated (and its thinking) without
+// completing it.
+func (s *session) discardText() {
+	if n := s.text.Len(); n > 0 {
+		slog.Info("bnbloc-acp dropping the text of a failed turn", "agent", s.agent.Name, "session", s.id, "bytes", n)
+	}
+	s.text.Reset()
+	s.textID = ""
+	s.thinking.Reset()
 }
 
 // finalizeText completes the message being aggregated (whitespace-only text

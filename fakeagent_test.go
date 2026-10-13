@@ -281,6 +281,17 @@ func (f *fakeAgent) prompt(id json.RawMessage, p map[string]any) {
 		f.reply(id, map[string]any{"stopReason": "cancelled"})
 	case "fail":
 		f.fail(id, -32603, "boom")
+	case "failafter":
+		// Streams part of a reply, then the turn errors.
+		f.update(map[string]any{"sessionUpdate": "agent_thought_chunk", "content": map[string]any{"type": "text", "text": "hmm"}})
+		f.text("partial answer", "p1")
+		f.fail(id, -32603, "provider overloaded")
+	case "stoperror":
+		f.text("partial answer", "")
+		f.reply(id, map[string]any{"stopReason": "error"})
+	case "crashafter":
+		f.text("partial answer", "")
+		os.Exit(3)
 	case "refuse":
 		f.reply(id, map[string]any{"stopReason": "refusal"})
 	case "crash":

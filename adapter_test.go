@@ -342,6 +342,78 @@ func TestFailedTurnsAreReported(t *testing.T) {
 	}
 }
 
+// rawPoll waits until the session is idle and reads its turn status over the
+// raw wire (failCode is not in the typed client's TurnStatus).
+func (h *harness) rawPoll(ws, sid string) turnStatus {
+	h.t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		if idle, err := h.client.SessionIdle(h.ctx(), h.ep, ws, sid); err == nil && idle {
+			break
+		}
+		if time.Now().After(deadline) {
+			h.t.Fatal("session never settled")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	resp, err := h.srv.Client().Get(h.srv.URL + "/core/v1/workspaces/" + ws + "/sessions/" + sid + "/turn")
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var ts turnStatus
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&ts) != nil {
+		h.t.Fatalf("PollTurn: HTTP %d", resp.StatusCode)
+	}
+	return ts
+}
+
+// An errored turn is a failed turn, never a reply: a JSON-RPC error, an
+// error stop reason and the agent exiting mid-turn each fail the turn with
+// its message and code, and the text streamed before the error never
+// becomes a completed message (nor leaks into the next turn's reply).
+func TestErroredTurnIsFailedNotAReply(t *testing.T) {
+	h := newHarness(t, Config{Agents: []AgentConfig{fakeAgentConfig(t, "fake", nil)}})
+	ws, _ := h.workspace()
+	sid := h.session(ws, "fake", "hello", core.SessionOptions{})
+	h.settle(ws, sid)
+	_, before, err := h.client.Messages(h.ctx(), h.ep, ws, sid, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ prompt, msg string }{
+		{"failafter", "the agent returned an error: provider overloaded"},
+		{"stoperror", "the agent ended the turn with an error"},
+	} {
+		h.send(ws, sid, c.prompt, core.SessionOptions{})
+		ts := h.rawPoll(ws, sid)
+		if !ts.Idle || !ts.Failed || ts.FailMessage != c.msg || ts.FailCode != failAgentError {
+			t.Fatalf("%s: status = %+v", c.prompt, ts)
+		}
+		if msgs := h.messages(ws, sid, before); len(msgs) != 0 {
+			t.Fatalf("%s: the failed turn served messages %q", c.prompt, texts(msgs))
+		}
+	}
+	h.send(ws, sid, "hello", core.SessionOptions{})
+	if ts := h.settle(ws, sid); ts.Failed {
+		t.Fatalf("a good turn after failed ones: %+v", ts)
+	}
+	msgs := h.messages(ws, sid, before)
+	if len(msgs) != 1 || msgs[0].Text != "hello world" || msgs[0].Thinking != "" {
+		t.Fatalf("next reply = %+v (the failed turns' text or thinking leaked into it)", msgs)
+	}
+
+	// The agent process exiting mid-turn (an agent that cannot resume).
+	sid = h.session(ws, "fake", "crashafter", core.SessionOptions{})
+	ts := h.rawPoll(ws, sid)
+	if !ts.Failed || ts.FailMessage != "the agent process exited during the turn" || ts.FailCode != failAgentExited {
+		t.Fatalf("crash: status = %+v", ts)
+	}
+	if msgs := h.messages(ws, sid, 0); len(msgs) != 0 {
+		t.Fatalf("crash: the failed turn served messages %q", texts(msgs))
+	}
+}
+
 func TestModelReasoningAndModeAreApplied(t *testing.T) {
 	a := fakeAgentConfig(t, "fake", nil)
 	a.Mode = "accept"

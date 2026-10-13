@@ -110,7 +110,7 @@ member's environment.
 | `POST /workspaces` | `mkdir <workspaces>/<id>` (0700). The directory is every session's `cwd`. |
 | `POST .../sessions` | spawn the agent, `initialize` (protocol 1; client capabilities `fs.readTextFile`, `fs.writeTextFile`, `terminal`), optional `authenticate`, `session/new {cwd, mcpServers}`, optional mode/model/reasoning, then `session/prompt` in the background. |
 | `POST .../input` | queued `session/prompt` (one turn at a time per session, FIFO). |
-| `GET .../idle`, `.../turn` | no turn running and nothing queued; the last turn's failure (JSON-RPC error, agent exit, `refusal`, or an empty `max_tokens` / `max_turn_requests` turn). |
+| `GET .../idle`, `.../turn` | no turn running and nothing queued; the last turn's failure (JSON-RPC error, `error` stop reason, agent exit, `refusal`, or an empty `max_tokens` / `max_turn_requests` turn) with `failMessage` and an additive `failCode`. |
 | `GET .../messages` | completed assistant messages, aggregated from `session/update` (below). |
 | `GET .../latest` | the most recently created session of the workspace. |
 | `POST .../interrupt` | `session/cancel` for the running turn; queued input is dropped. |
@@ -132,6 +132,18 @@ session's current model), `inputTokens` / `outputTokens` when the prompt
 response reports usage, `costUsd` when the agent reports a USD session cost
 (the delta over the turn). Without token usage the metrics say
 `reported: false`.
+
+**Failed turns.** An errored turn is a failed turn, never a reply: when the
+prompt ends in a JSON-RPC error, an `error` stop reason (not an ACP stop
+reason, but some agents use it) or the agent process exiting, the turn's
+status is `failed` with `failMessage` (the agent's own error message, never
+its stderr) and `failCode` (`agent_error`, `agent_exited`, `session_lost`;
+`refusal`, `no_reply`, `permission_refused` for the turns that end without
+a reply). The text streamed since the last completed message is dropped
+with its thinking, under the same lock that records the failure, so no poll
+order can serve it as a completed reply. Messages that completed earlier in
+the turn (before a tool call) were already served as progress. `failCode`
+is an additive field beside Core Protocol v1's `PollTurnResponse`.
 
 **Profiles in a reused workspace.** A workspace outlives its sessions
 (bnbloc's core-providers guide), so each session's profile is materialized

@@ -52,6 +52,9 @@ const (
 	stopReasonRefusal        = "refusal"
 	stopReasonMaxTokens      = "max_tokens"
 	stopReasonMaxTurnRequest = "max_turn_requests"
+	// stopReasonError is not one of ACP's stop reasons: some agents end a
+	// turn that failed with it instead of a JSON-RPC error.
+	stopReasonError = "error"
 )
 
 type acpImplementation struct {

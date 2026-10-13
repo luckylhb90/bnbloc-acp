@@ -71,6 +71,11 @@ the reason and offers no target; nothing else breaks.
 - **Messages:** streamed chunks are aggregated into completed assistant
   messages; the last message of a turn carries the model, token usage and
   cost when the agent reports them.
+- **Failed turns:** a turn the agent ends with an error (a JSON-RPC error,
+  an `error` stop reason, or its process exiting mid-turn) is reported
+  failed by `PollTurn` (`failed`, `failMessage`, and a `failCode` such as
+  `agent_error` or `agent_exited`); the text it streamed since its last
+  completed message is dropped, never served as a reply.
 - **Turns** run one at a time; input sent during a turn is queued; interrupt
   cancels the turn (`session/cancel`) and drops the queue.
 - **Deliverables:** files the agent writes in the workspace appear in the room.

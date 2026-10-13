@@ -75,7 +75,13 @@ func (w *workspaces) remove(id string) error {
 	if err != nil {
 		return err
 	}
-	return os.RemoveAll(ws.dir)
+	if err := os.RemoveAll(ws.dir); err != nil {
+		return err
+	}
+	if err := os.Remove(ws.profileRecordPath()); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 // errBadPath / errFileNotFound / errFileTooLarge map to bad_request,

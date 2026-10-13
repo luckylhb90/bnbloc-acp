@@ -115,7 +115,7 @@ member's environment.
 | `GET .../latest` | the most recently created session of the workspace. |
 | `POST .../interrupt` | `session/cancel` for the running turn; queued input is dropped. |
 | `PUT /workspaces/{ws}/files/{path}` | the bridge's `.room/` context and the agent-config paths (`CLAUDE.md`, `AGENTS.md`, `.claude/skills/`, `.agents/skills/`, `.opencode/`, `.mcp.json`); any other path is refused. |
-| `POST /workspaces/{ws}/sessions` `profile` | capability `agentProfile`: mapped per agent by its `profile` block (README "Experts and skills"). |
+| `POST /workspaces/{ws}/sessions` `profile` | capability `agentProfile`: mapped per agent by its `profile` block (README "Experts and skills"), materialized afresh per session (the earlier profile's instructions file and skills directory removed first). |
 | `GET .../files`, `GET /workspaces/{ws}/files/{path}` | the workspace's deliverables. |
 | `DELETE /workspaces/{ws}` | stop its sessions' agents, remove the directory. |
 
@@ -132,6 +132,19 @@ session's current model), `inputTokens` / `outputTokens` when the prompt
 response reports usage, `costUsd` when the agent reports a USD session cost
 (the delta over the turn). Without token usage the metrics say
 `reported: false`.
+
+**Profiles in a reused workspace.** A workspace outlives its sessions
+(bnbloc's core-providers guide), so each session's profile is materialized
+afresh. The adapter records what it wrote for profiles in
+`<workspaces>/<id>.profile.json` (outside the workspace, so neither the
+agent nor a deliverables listing sees it, and it survives adapter
+restarts): the instructions file and the skills directory. Before writing a
+session's profile it removes the recorded instructions file (unless it is
+rewritten) and the recorded and current skills directories, which then hold
+exactly the profile's skills; a session without a profile removes them and
+the record. Only agent-config paths are removed; a path whose parent
+resolves through a symlink is refused, and a symlink at the path itself is
+removed as a link, so the agent's own files are never touched.
 
 **Sessions and processes.** One agent process per session (crash-isolated,
 own `cwd`, own spawn args). When the agent can continue a session

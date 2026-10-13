@@ -127,6 +127,13 @@ directory). Mappings known to work:
 - **Secrets** (env values, MCP header and env values) are never logged and
   never written to disk; they live only in the session's memory and the agent
   process environment.
+- **One role at a time:** a workspace outlives its sessions, so each
+  session's profile is materialized afresh: what the adapter wrote for an
+  earlier profile (its instructions file, and the skills directory, which
+  holds exactly the current profile's skills) is removed first, by a record
+  kept beside the workspace (`<home>/workspaces/<id>.profile.json`). A
+  session without a profile wears none. Only agent-config paths are ever
+  removed, never through a symlink: the agent's own files stay.
 - **Resume:** a session continued after an idle stop wears the same profile:
   its files are written again and its env, `_meta` and MCP servers reach the
   new process.

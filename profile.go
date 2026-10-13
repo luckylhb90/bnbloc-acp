@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/luckylhb90/bnbloc/core"
 )
@@ -64,13 +65,13 @@ func (pc ProfileConfig) validate() error {
 		}
 	case strings.HasPrefix(via, viaFile):
 		p := strings.TrimPrefix(via, viaFile)
-		if !core.WorkspaceFileAllowed(p) || strings.HasPrefix(p, core.RoomContextDir) {
+		if !agentConfigFile(p) {
 			return fmt.Errorf("profile.instructionsVia %q: the file must be an agent-config path (e.g. AGENTS.md, CLAUDE.md)", via)
 		}
 	default:
 		return fmt.Errorf("profile.instructionsVia %q: want meta, env:<NAME> or file:<path>", via)
 	}
-	if !core.WorkspaceFileAllowed(pc.SkillsDir+"/x/SKILL.md") || strings.HasPrefix(pc.SkillsDir+"/", core.RoomContextDir) {
+	if !agentConfigDir(pc.SkillsDir) {
 		return fmt.Errorf("profile.skillsDir %q: must be a directory inside the agent-config paths (e.g. .claude/skills, .agents/skills, .opencode/skills)", pc.SkillsDir)
 	}
 	return nil
@@ -91,36 +92,150 @@ func (a AgentConfig) effectiveProfileConfig() ProfileConfig {
 	return pc
 }
 
-// materializeProfile writes the profile's files into the workspace: the
-// instructions file (file:<path>) and every skill under the skills dir (a
-// skill's directory is replaced, so a re-materialization leaves no stale
-// files). Run at session open and again when the session continues in a new
-// agent process.
-func materializeProfile(p *core.AgentProfile, ws workspaceRoot, pc ProfileConfig) error {
-	if p == nil {
+// profileMu serializes profile materialization: sessions of one workspace
+// (a new one, an earlier one continuing in a new process) share its
+// agent-config files.
+var profileMu sync.Mutex
+
+// profileRecord is what the adapter wrote into a workspace for profiles, kept
+// beside the workspace directory (<workspaces>/<id>.profile.json, outside
+// the agent's reach and never a deliverable) so a later session, also after
+// an adapter restart, removes exactly that and nothing of the agent's.
+type profileRecord struct {
+	// InstructionsFile is the instructions file written (file:<path>).
+	InstructionsFile string `json:"instructionsFile,omitempty"`
+	// SkillsDir is the skills directory the adapter owns while a profile is
+	// worn: it holds exactly the profile's skills.
+	SkillsDir string `json:"skillsDir,omitempty"`
+}
+
+func (ws workspaceRoot) profileRecordPath() string { return ws.dir + ".profile.json" }
+
+// readProfileRecord returns the workspace's record; a missing or unreadable
+// one is empty, and a path that is not an agent-config path is dropped (the
+// record never widens what may be removed).
+func (ws workspaceRoot) readProfileRecord() profileRecord {
+	var rec profileRecord
+	raw, err := os.ReadFile(ws.profileRecordPath())
+	if err != nil {
+		return rec
+	}
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		slog.Warn("bnbloc-acp ignoring an unreadable profile record", "path", ws.profileRecordPath(), "error", err)
+		return profileRecord{}
+	}
+	if !agentConfigFile(rec.InstructionsFile) {
+		rec.InstructionsFile = ""
+	}
+	if !agentConfigDir(rec.SkillsDir) {
+		rec.SkillsDir = ""
+	}
+	return rec
+}
+
+func (ws workspaceRoot) writeProfileRecord(rec profileRecord) error {
+	if rec == (profileRecord{}) {
+		if err := os.Remove(ws.profileRecordPath()); err != nil && !os.IsNotExist(err) {
+			return err
+		}
 		return nil
 	}
-	if strings.HasPrefix(pc.InstructionsVia, viaFile) && strings.TrimSpace(p.Instructions) != "" {
-		if err := ws.writeConfigFile(strings.TrimPrefix(pc.InstructionsVia, viaFile), []byte(p.Instructions)); err != nil {
+	raw, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(ws.profileRecordPath(), raw, 0o600)
+}
+
+// agentConfigFile / agentConfigDir: a workspace-relative agent-config file,
+// or a directory whose contents are agent-config paths (never .room/).
+func agentConfigFile(rel string) bool {
+	return rel != "" && core.WorkspaceFileAllowed(rel) && !strings.HasPrefix(rel, core.RoomContextDir)
+}
+
+func agentConfigDir(rel string) bool {
+	return rel != "" && agentConfigFile(rel+"/x/SKILL.md")
+}
+
+// removeConfigPath removes one agent-config file or directory of the
+// workspace. The path's parent must resolve to itself inside the workspace:
+// a symlinked parent could point at the agent's project files, so it is
+// refused rather than followed; a symlink at the path itself is removed as a
+// link (never its target).
+func (ws workspaceRoot) removeConfigPath(rel string) error {
+	lexical := filepath.Join(ws.real, filepath.FromSlash(rel))
+	parent, err := ws.resolve(filepath.Dir(filepath.Join(ws.dir, filepath.FromSlash(rel))))
+	if err != nil {
+		return err
+	}
+	if parent != filepath.Dir(lexical) {
+		return fmt.Errorf("%w: %s goes through a symlink", errOutsideWorkspace, rel)
+	}
+	return os.RemoveAll(lexical)
+}
+
+// materializeProfile makes the workspace wear the session's profile, and
+// only it: the workspace outlives its sessions, so first what the adapter
+// wrote for an earlier profile goes (its instructions file and the skills
+// directory it owns, per the workspace's profileRecord, plus this agent's
+// skills directory), then the instructions file (file:<path>) and every
+// skill under the skills dir are written. The agent's own files are never
+// touched: only agent-config paths are removed. A session without a profile
+// removes the earlier profile's files and wears none. Run at session open
+// and again when the session continues in a new agent process.
+func materializeProfile(p *core.AgentProfile, ws workspaceRoot, pc ProfileConfig) error {
+	profileMu.Lock()
+	defer profileMu.Unlock()
+	prev := ws.readProfileRecord()
+	var next profileRecord
+	if p != nil {
+		next.SkillsDir = pc.SkillsDir
+		if strings.HasPrefix(pc.InstructionsVia, viaFile) && strings.TrimSpace(p.Instructions) != "" {
+			next.InstructionsFile = strings.TrimPrefix(pc.InstructionsVia, viaFile)
+		}
+	}
+	// The record first names everything the workspace may hold afterwards, so
+	// a failure half way never leaves a file the next session would miss.
+	if err := ws.writeProfileRecord(profileRecord{
+		InstructionsFile: firstNonEmpty(next.InstructionsFile, prev.InstructionsFile),
+		SkillsDir:        firstNonEmpty(next.SkillsDir, prev.SkillsDir),
+	}); err != nil {
+		return err
+	}
+	if prev.InstructionsFile != "" && prev.InstructionsFile != next.InstructionsFile {
+		if err := ws.removeConfigPath(prev.InstructionsFile); err != nil {
 			return err
 		}
 	}
-	for _, s := range p.Skills {
-		dir := pc.SkillsDir + "/" + s.Name
-		real, err := ws.resolve(filepath.Join(ws.dir, filepath.FromSlash(dir)))
-		if err != nil {
-			return err
-		}
-		if err := os.RemoveAll(real); err != nil {
-			return err
-		}
-		for _, f := range s.Files {
-			if err := ws.writeConfigFile(dir+"/"+f.Path, f.Content); err != nil {
+	for _, dir := range []string{prev.SkillsDir, next.SkillsDir} {
+		if dir != "" {
+			if err := ws.removeConfigPath(dir); err != nil {
 				return err
 			}
 		}
 	}
-	return nil
+	if p != nil {
+		if next.InstructionsFile != "" {
+			if err := ws.writeConfigFile(next.InstructionsFile, []byte(p.Instructions)); err != nil {
+				return err
+			}
+		}
+		for _, s := range p.Skills {
+			for _, f := range s.Files {
+				if err := ws.writeConfigFile(pc.SkillsDir+"/"+s.Name+"/"+f.Path, f.Content); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return ws.writeProfileRecord(next)
+}
+
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }
 
 // profileMeta is the session/new _meta for instructionsVia "meta" (nil otherwise):
@@ -237,7 +352,7 @@ func profileMCPServers(p *core.AgentProfile, a AgentConfig, init acpInitializeRe
 // profile's instructions file and skills; the bridge's PUT .../files for an
 // agent-config path).
 func (ws workspaceRoot) writeConfigFile(rel string, content []byte) error {
-	if !core.WorkspaceFileAllowed(rel) || strings.HasPrefix(rel, core.RoomContextDir) {
+	if !agentConfigFile(rel) {
 		return fmt.Errorf("%w: %s is not an agent-config path", errBadPath, rel)
 	}
 	return ws.writeAllowed(rel, content)

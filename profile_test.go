@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -344,5 +345,167 @@ func TestTargetsReportMCPTransports(t *testing.T) {
 	}
 	if got["plain"] != "stdio" || got["web"] != "stdio,http,sse" {
 		t.Fatalf("transports = %v", got)
+	}
+}
+
+// The workspace outlives its sessions: each session's profile is
+// materialized afresh, so a later profile leaves none of an earlier one's
+// skills or instructions behind (also across agents with other mappings and
+// for a session without a profile), and the agent's own files stay.
+func TestLaterProfileReplacesTheEarlierOne(t *testing.T) {
+	a := fakeAgentConfig(t, "a", nil)
+	a.Profile = &ProfileConfig{InstructionsVia: "file:AGENTS.md", SkillsDir: ".agents/skills"}
+	b := fakeAgentConfig(t, "b", nil)
+	b.Profile = &ProfileConfig{InstructionsVia: "file:CLAUDE.md", SkillsDir: ".claude/skills"}
+	h := newHarness(t, Config{Agents: []AgentConfig{a, b}})
+	ws, root := h.workspace()
+	project := map[string]string{"README.md": "mine", "src/app.go": "package app", ".agents/notes.txt": "mine too"}
+	for p, c := range project {
+		full := filepath.Join(root.dir, filepath.FromSlash(p))
+		if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(c), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	skill := func(name string) map[string]any {
+		return map[string]any{"name": name, "files": []map[string]any{
+			{"path": "SKILL.md", "content": "---\nname: " + name + "\ndescription: d\n---\n"},
+			{"path": "ref/notes.md", "content": name}}}
+	}
+	run := func(target string, prof map[string]any) {
+		t.Helper()
+		sid, perr := h.sessionWithProfile(ws, target, "hello", prof)
+		if perr != nil {
+			t.Fatal(perr)
+		}
+		if ts := h.settle(ws, sid); ts.Failed {
+			t.Fatalf("turn failed: %+v", ts)
+		}
+	}
+	read := func(rel string) (string, bool) {
+		raw, err := os.ReadFile(filepath.Join(root.dir, filepath.FromSlash(rel)))
+		return string(raw), err == nil
+	}
+	absent := func(rels ...string) {
+		t.Helper()
+		for _, rel := range rels {
+			if _, err := os.Lstat(filepath.Join(root.dir, filepath.FromSlash(rel))); !os.IsNotExist(err) {
+				t.Fatalf("%s is still there (%v)", rel, err)
+			}
+		}
+	}
+	projectIntact := func() {
+		t.Helper()
+		for p, c := range project {
+			if got, ok := read(p); !ok || got != c {
+				t.Fatalf("project file %s = %q, %v", p, got, ok)
+			}
+		}
+	}
+
+	run("a", map[string]any{"instructions": "role A", "skills": []map[string]any{skill("x"), skill("y")}})
+	if got, _ := read("AGENTS.md"); got != "role A" {
+		t.Fatalf("AGENTS.md = %q", got)
+	}
+	if _, ok := read(".agents/skills/x/ref/notes.md"); !ok {
+		t.Fatal("skill x not written")
+	}
+	// A skill file written into the skills directory by anyone else goes too:
+	// the directory holds exactly the profile's skills.
+	if err := h.client.WriteWorkspaceFile(h.ctx(), h.ep, ws, ".agents/skills/stray/SKILL.md", "x"); err != nil {
+		t.Fatal(err)
+	}
+
+	run("a", map[string]any{"instructions": "role B", "skills": []map[string]any{skill("y")}})
+	absent(".agents/skills/x", ".agents/skills/stray")
+	if got, _ := read("AGENTS.md"); got != "role B" {
+		t.Fatalf("AGENTS.md = %q", got)
+	}
+	if got, ok := read(".agents/skills/y/ref/notes.md"); !ok || got != "y" {
+		t.Fatalf("skill y = %q, %v", got, ok)
+	}
+	projectIntact()
+
+	// Another agent's mapping: the earlier profile's files (by the
+	// workspace's record) are removed, the new ones written.
+	run("b", map[string]any{"instructions": "role C", "skills": []map[string]any{skill("z")}})
+	absent("AGENTS.md", ".agents/skills")
+	if got, _ := read("CLAUDE.md"); got != "role C" {
+		t.Fatalf("CLAUDE.md = %q", got)
+	}
+	if _, ok := read(".claude/skills/z/SKILL.md"); !ok {
+		t.Fatal("skill z not written")
+	}
+	projectIntact()
+
+	// A profile without instructions or skills, then no profile at all.
+	run("b", map[string]any{"env": map[string]string{"K": "v"}})
+	absent("CLAUDE.md", ".claude/skills/z")
+	run("b", map[string]any{"instructions": "role D"})
+	h.settle(ws, h.session(ws, "b", "hello", core.SessionOptions{}))
+	absent("CLAUDE.md", ".claude/skills")
+	if _, err := os.Stat(root.profileRecordPath()); !os.IsNotExist(err) {
+		t.Fatalf("profile record kept after a session without profile: %v", err)
+	}
+	projectIntact()
+}
+
+// Clearing never follows a symlink into the agent's files: a skills
+// directory replaced by a link is removed as a link, and a skills directory
+// reached through a linked parent is refused.
+func TestProfileClearNeverFollowsSymlinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on Windows")
+	}
+	wsDir := filepath.Join(t.TempDir(), "0123456789abcdef")
+	if err := os.Mkdir(wsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root, err := newWorkspaceRoot(wsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(root.dir, "src")
+	if err := os.MkdirAll(src, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "app.go"), []byte("package app"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pc := ProfileConfig{InstructionsVia: viaMeta, SkillsDir: ".agents/skills"}
+	prof := &core.AgentProfile{Skills: []core.ProfileSkill{{Name: "x", Files: []core.ProfileFile{{Path: "SKILL.md", Content: []byte("x")}}}}}
+
+	if err := os.MkdirAll(filepath.Join(root.dir, ".agents"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(src, filepath.Join(root.dir, ".agents", "skills")); err != nil {
+		t.Fatal(err)
+	}
+	if err := materializeProfile(prof, root, pc); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(src, "app.go")); err != nil {
+		t.Fatalf("project file removed through a linked skills dir: %v", err)
+	}
+	if st, err := os.Lstat(filepath.Join(root.dir, ".agents", "skills")); err != nil || !st.IsDir() {
+		t.Fatalf("skills dir = %v, %v (want a real directory)", st, err)
+	}
+
+	if err := os.RemoveAll(filepath.Join(root.dir, ".agents")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(src, filepath.Join(root.dir, ".agents")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(src, "skills", "keep"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := materializeProfile(prof, root, pc); !errors.Is(err, errOutsideWorkspace) {
+		t.Fatalf("clear through a linked parent = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(src, "skills", "keep")); err != nil {
+		t.Fatalf("project dir removed through a linked parent: %v", err)
 	}
 }

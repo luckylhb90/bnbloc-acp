@@ -85,6 +85,10 @@ type session struct {
 	// refused lists the tool calls the policy refused during the turn, so a
 	// turn that ends without a reply says why.
 	refused []string
+	// metaErr is the turn failure an agent reported in session_info_update
+	// metadata ("" = none), and metaLastErr the last error it reported there
+	// (its cause; metaTurnState).
+	metaErr, metaLastErr string
 
 	terminals map[string]*terminal
 }
@@ -264,7 +268,7 @@ func (s *session) run() {
 		s.queue = s.queue[1:]
 		s.cancelled = false
 		s.status, s.statusServed = turnStatus{}, false
-		s.turnCost, s.refused = 0, nil
+		s.turnCost, s.refused, s.metaErr, s.metaLastErr = 0, nil, "", ""
 		if s.cost != nil {
 			s.turnCost = s.cost.amount
 		}
@@ -290,7 +294,7 @@ func (s *session) turn(in turnInput) {
 	defer s.mu.Unlock()
 	cancelled := s.cancelled || resp.StopReason == stopReasonCancelled
 	if !cancelled {
-		if code, msg := turnFailure(err, resp); code != "" {
+		if code, msg := turnFailure(err, resp, s.metaErr); code != "" {
 			// An errored turn is a failed turn, never a reply: the text the
 			// agent streamed since its last completed message is the failure's
 			// output, so it is dropped rather than completed (a poll never sees
@@ -341,13 +345,15 @@ func (s *session) setFailed(code, msg string) {
 }
 
 // turnFailure is how an errored turn failed: its fail code and room-visible
-// reason (the agent's own JSON-RPC error message, never its stderr), or ""
-// when the turn did not error.
-func turnFailure(err error, resp acpPromptResponse) (code, msg string) {
+// reason (the agent's own JSON-RPC error message or the error its metadata
+// reported, never its stderr), or "" when the turn did not error.
+func turnFailure(err error, resp acpPromptResponse, metaErr string) (code, msg string) {
 	var rerr *rpcError
 	switch {
 	case err == nil && resp.StopReason == stopReasonError:
 		return failAgentError, "the agent ended the turn with an error"
+	case err == nil && metaErr != "":
+		return failAgentError, "the agent returned an error: " + metaErr
 	case err == nil:
 		return "", ""
 	case errors.As(err, &rerr):
@@ -618,7 +624,53 @@ func (s *session) Notify(method string, params json.RawMessage) {
 		if u.Cost != nil {
 			s.cost = &costState{amount: u.Cost.Amount, currency: u.Cost.Currency}
 		}
+	case "session_info_update":
+		cause, failed := metaTurnState(u.Meta)
+		if cause != "" {
+			s.metaLastErr = cause
+		}
+		if failed {
+			s.metaErr = firstNonEmpty(s.metaLastErr, "the agent stopped with a system error")
+		}
 	}
+}
+
+// maxMetaErr bounds the agent error a failed turn reports.
+const maxMetaErr = 500
+
+// metaTurnState reads a turn failure an agent reports in session_info_update
+// metadata rather than as a JSON-RPC error or an error stop reason. Codex
+// (codex-acp) does so: on a provider error it reports the cause in
+// _meta.codex.error updates ("Reconnecting... 1/5", additionalDetails the
+// provider's answer), then sets _meta.codex.threadStatus.type "systemError",
+// streams the error as message text and ends the turn with end_turn. cause
+// is an error the update reports (recovered ones too), failed whether it
+// marks the turn failed: only the system error status does.
+func metaTurnState(meta json.RawMessage) (cause string, failed bool) {
+	if len(meta) == 0 {
+		return "", false
+	}
+	var m struct {
+		Codex *struct {
+			ThreadStatus *struct {
+				Type string `json:"type"`
+			} `json:"threadStatus"`
+			Error *struct {
+				Message           string `json:"message"`
+				AdditionalDetails string `json:"additionalDetails"`
+			} `json:"error"`
+		} `json:"codex"`
+	}
+	if json.Unmarshal(meta, &m) != nil || m.Codex == nil {
+		return "", false
+	}
+	if e := m.Codex.Error; e != nil {
+		cause = strings.TrimSpace(firstNonEmpty(e.AdditionalDetails, e.Message))
+		if r := []rune(cause); len(r) > maxMetaErr {
+			cause = string(r[:maxMetaErr]) + "…"
+		}
+	}
+	return cause, m.Codex.ThreadStatus != nil && m.Codex.ThreadStatus.Type == "systemError"
 }
 
 // discardText drops the message being aggregated (and its thinking) without

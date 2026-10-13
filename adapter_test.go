@@ -384,6 +384,7 @@ func TestErroredTurnIsFailedNotAReply(t *testing.T) {
 	for _, c := range []struct{ prompt, msg string }{
 		{"failafter", "the agent returned an error: provider overloaded"},
 		{"stoperror", "the agent ended the turn with an error"},
+		{"systemerror", "the agent returned an error: unexpected status 403 Forbidden: model not allowed"},
 	} {
 		h.send(ws, sid, c.prompt, core.SessionOptions{})
 		ts := h.rawPoll(ws, sid)
@@ -394,6 +395,16 @@ func TestErroredTurnIsFailedNotAReply(t *testing.T) {
 			t.Fatalf("%s: the failed turn served messages %q", c.prompt, texts(msgs))
 		}
 	}
+	// A reconnect the agent recovers from is a reply, not a failure.
+	_, mark, _ := h.client.Messages(h.ctx(), h.ep, ws, sid, 0)
+	h.send(ws, sid, "recovered", core.SessionOptions{})
+	if ts := h.rawPoll(ws, sid); ts.Failed {
+		t.Fatalf("recovered: status = %+v", ts)
+	}
+	if msgs := h.messages(ws, sid, mark); len(msgs) != 1 || msgs[0].Text != "recovered answer" {
+		t.Fatalf("recovered: messages %q", texts(msgs))
+	}
+	_, before, _ = h.client.Messages(h.ctx(), h.ep, ws, sid, 0)
 	h.send(ws, sid, "hello", core.SessionOptions{})
 	if ts := h.settle(ws, sid); ts.Failed {
 		t.Fatalf("a good turn after failed ones: %+v", ts)

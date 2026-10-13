@@ -286,6 +286,23 @@ func (f *fakeAgent) prompt(id json.RawMessage, p map[string]any) {
 		f.update(map[string]any{"sessionUpdate": "agent_thought_chunk", "content": map[string]any{"type": "text", "text": "hmm"}})
 		f.text("partial answer", "p1")
 		f.fail(id, -32603, "provider overloaded")
+	case "systemerror":
+		// Codex's provider error: the cause in _meta updates, a system
+		// error status, the error as message text, then end_turn.
+		f.text("Warning: Model metadata not found.\n\n", "")
+		for i := 1; i <= 2; i++ {
+			f.update(map[string]any{"sessionUpdate": "session_info_update", "_meta": map[string]any{"codex": map[string]any{"error": map[string]any{
+				"message": fmt.Sprintf("Reconnecting... %d/2", i), "additionalDetails": "unexpected status 403 Forbidden: model not allowed"}}}})
+		}
+		f.update(map[string]any{"sessionUpdate": "session_info_update", "_meta": map[string]any{"codex": map[string]any{"threadStatus": map[string]any{"type": "systemError"}}}})
+		f.text("unexpected status 403 Forbidden: model not allowed", "")
+		end("end_turn")
+	case "recovered":
+		// A reconnect that recovers is not a failure.
+		f.update(map[string]any{"sessionUpdate": "session_info_update", "_meta": map[string]any{"codex": map[string]any{"error": map[string]any{"message": "Reconnecting... 1/5"}}}})
+		f.update(map[string]any{"sessionUpdate": "session_info_update", "_meta": map[string]any{"codex": map[string]any{"threadStatus": map[string]any{"type": "active"}}}})
+		f.text("recovered answer", "")
+		end("end_turn")
 	case "stoperror":
 		f.text("partial answer", "")
 		f.reply(id, map[string]any{"stopReason": "error"})

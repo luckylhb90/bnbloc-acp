@@ -226,7 +226,10 @@ type acpSessionNotification struct {
 // acpSessionUpdate holds the fields of every session/update variant the
 // adapter reads; SessionUpdate names the variant.
 type acpSessionUpdate struct {
-	SessionUpdate string            `json:"sessionUpdate"`
+	SessionUpdate string `json:"sessionUpdate"`
+	// Meta is the agent's own metadata (session_info_update carries an
+	// agent's turn state there; see metaTurnError).
+	Meta          json.RawMessage   `json:"_meta"`
 	Content       *acpContentBlock  `json:"content"`
 	MessageID     string            `json:"messageId"`
 	ConfigOptions []acpConfigOption `json:"configOptions"`

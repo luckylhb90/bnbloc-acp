@@ -318,6 +318,10 @@ func (f *fakeAgent) prompt(id json.RawMessage, p map[string]any) {
 		f.update(map[string]any{"sessionUpdate": "session_info_update", "_meta": map[string]any{"codex": map[string]any{"threadStatus": map[string]any{"type": "active"}}}})
 		f.text("recovered answer", "")
 		end("end_turn")
+	case "overflow":
+		// The provider refuses a conversation longer than the model's window.
+		f.text("partial", "")
+		f.fail(id, -32603, "API Error: 400 The input (1245699 tokens) is longer than the model's context length (327680 tokens).")
 	case "stoperror":
 		f.text("partial answer", "")
 		f.reply(id, map[string]any{"stopReason": "error"})

@@ -858,3 +858,70 @@ func TestActivityTitle(t *testing.T) {
 		t.Fatalf("len = %d", utf8.RuneCountInString(got))
 	}
 }
+
+// A turn that outgrew the model's context window fails as context_overflow,
+// and the next turn runs in a fresh ACP session (same protocol session),
+// never resuming the overflowing one.
+func TestContextOverflowStartsAFreshSession(t *testing.T) {
+	h := newHarness(t, Config{Agents: []AgentConfig{fakeAgentConfig(t, "fake", nil)}})
+	ws, _ := h.workspace()
+	sid := h.session(ws, "fake", "whoami", core.SessionOptions{})
+	h.settle(ws, sid)
+	_, mark, _ := h.client.Messages(h.ctx(), h.ep, ws, sid, 0)
+	first := h.messages(ws, sid, 0)
+	if len(first) != 1 || !strings.Contains(first[0].Text, "session=") {
+		t.Fatalf("first reply = %q", texts(first))
+	}
+	before := sessionField(first[0].Text)
+
+	h.send(ws, sid, "overflow", core.SessionOptions{})
+	ts := h.rawPoll(ws, sid)
+	if !ts.Failed || ts.FailCode != failContextOverflow || ts.FailMessage != contextOverflowMessage {
+		t.Fatalf("overflow: status = %+v", ts)
+	}
+	if msgs := h.messages(ws, sid, mark); len(msgs) != 0 {
+		t.Fatalf("overflow served messages %q", texts(msgs))
+	}
+
+	_, mark, _ = h.client.Messages(h.ctx(), h.ep, ws, sid, 0)
+	h.send(ws, sid, "whoami", core.SessionOptions{})
+	if ts := h.settle(ws, sid); ts.Failed {
+		t.Fatalf("turn after the overflow: %+v", ts)
+	}
+	next := h.messages(ws, sid, mark)
+	if len(next) != 1 {
+		t.Fatalf("reply after the overflow = %q", texts(next))
+	}
+	if after := sessionField(next[0].Text); after == before || after == "" || strings.Contains(next[0].Text, "resumed=true") {
+		t.Fatalf("after the overflow the session is %q (was %q): %s", after, before, next[0].Text)
+	}
+}
+
+// sessionField reads the fake agent's "session=<id>" from a whoami reply.
+func sessionField(text string) string {
+	for _, f := range strings.Fields(text) {
+		if v, ok := strings.CutPrefix(f, "session="); ok {
+			return v
+		}
+	}
+	return ""
+}
+
+func TestContextOverflowClassification(t *testing.T) {
+	for _, s := range []string{
+		"the agent returned an error: litellm.ContextWindowExceededError: BadRequestError",
+		"prompt is too long: 230000 tokens > 200000 maximum",
+		"The input (1245699 tokens) is longer than the model's context length (327680 tokens).",
+		"This model's maximum context length is 128000 tokens",
+		"Request has too many tokens",
+	} {
+		if !contextOverflow(s) {
+			t.Errorf("not an overflow: %q", s)
+		}
+	}
+	for _, s := range []string{"provider overloaded", "unexpected status 403 Forbidden: model not allowed", "the agent ended the turn with an error"} {
+		if contextOverflow(s) {
+			t.Errorf("an overflow: %q", s)
+		}
+	}
+}

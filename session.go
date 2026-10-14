@@ -59,8 +59,11 @@ type session struct {
 	proc      *agentProc
 	acpID     string
 	resumable bool // the agent advertises session/resume
-	loadable  bool // the agent advertises loadSession
-	options   []acpConfigOption
+	// fresh: the conversation outgrew the model's context; the next turn
+	// starts a new ACP session (overflow.go).
+	fresh    bool
+	loadable bool // the agent advertises loadSession
+	options  []acpConfigOption
 	// spawnModel is the model a config-declared catalog applied through
 	// modelArgs at spawn ("" otherwise).
 	spawnModel string
@@ -316,6 +319,11 @@ func (s *session) turn(in turnInput) {
 	cancelled := s.cancelled || resp.StopReason == stopReasonCancelled
 	if !cancelled {
 		if code, msg := turnFailure(err, resp, s.metaErr); code != "" {
+			if code != failSessionLost && contextOverflow(msg) {
+				// The conversation outgrew the model: the next turn starts a
+				// fresh ACP session rather than resuming this one.
+				code, msg, s.fresh = failContextOverflow, contextOverflowMessage, true
+			}
 			// An errored turn is a failed turn, never a reply: the text the
 			// agent streamed since its last completed message is the failure's
 			// output, so it is dropped rather than completed (a poll never sees
@@ -363,6 +371,8 @@ const (
 	failNoReply           = "no_reply"           // max_tokens / max_turn_requests, no reply
 	failPermissionRefused = "permission_refused" // the policy refused, no reply
 	failDeadline          = "deadline"           // still running at its deadline (live.go)
+	// failContextOverflow (overflow.go): the conversation outgrew the
+	// model's context window.
 )
 
 func (s *session) setFailed(code, msg string) {
@@ -431,10 +441,13 @@ func (s *session) turnMetrics(resp acpPromptResponse) map[string]any {
 func (s *session) ensureProc() (*agentProc, error) {
 	s.mu.Lock()
 	proc := s.proc
-	resumable, loadable, closed := s.resumable, s.loadable, s.closed
+	resumable, loadable, closed, fresh := s.resumable, s.loadable, s.closed, s.fresh
 	s.mu.Unlock()
 	if closed {
 		return nil, errSessionLost
+	}
+	if fresh {
+		return s.startFresh()
 	}
 	if proc != nil && proc.alive() {
 		return proc, nil

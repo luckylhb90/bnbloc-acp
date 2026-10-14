@@ -76,6 +76,11 @@ the reason and offers no target; nothing else breaks.
   failed by `PollTurn` (`failed`, `failMessage`, and a `failCode` such as
   `agent_error` or `agent_exited`); the text it streamed since its last
   completed message is dropped, never served as a reply.
+- **Context overflow:** a failed turn whose error says the conversation is
+  longer than the model's context window is reported with `failCode`
+  `context_overflow`, and the next turn starts a fresh ACP session in the
+  same workspace (the protocol session id stays); the overflowing session
+  is never resumed.
 - **Turns** run one at a time; input sent during a turn is queued; interrupt
   cancels the turn (`session/cancel`) and drops the queue.
 - **Deadlines:** a session create or input may carry `deadlineMs` (the

@@ -107,8 +107,9 @@ func (s *session) watchDeadline(deadline time.Time) (stop func()) {
 
 // noteActivity records a step of the running turn (s.mu held): a thought or
 // text continues the step of its kind, a tool call is its own step (a later
-// update of the same call retitles it), and only the latest maxActivity
-// steps are kept.
+// update of the same call retitles it), a step without a call id (a
+// stderrActivity rule's, an MCP notice) continues an equal latest step, and
+// only the latest maxActivity steps are kept.
 func (s *session) noteActivity(kind, title, toolCallID string) {
 	now := time.Now().UnixMilli()
 	title = activityTitle(title)
@@ -121,7 +122,7 @@ func (s *session) noteActivity(kind, title, toolCallID string) {
 				return
 			}
 		}
-	} else if n := len(s.activity); n > 0 && s.activity[n-1].Kind == kind && s.activity[n-1].toolCallID == "" {
+	} else if n := len(s.activity); n > 0 && s.activity[n-1].Kind == kind && s.activity[n-1].toolCallID == "" && (kind != activityTool || s.activity[n-1].Title == title) {
 		s.activity[n-1].AtMs = now
 		return
 	}

@@ -50,6 +50,7 @@ Each agent uses its own sign-in (log in to Claude Code, Codex, … as usual).
 | `mode` | An ACP session mode applied to every session. |
 | `mcpServers` | MCP servers passed to every session. |
 | `profile` | How a session's expert profile maps onto this agent (below). |
+| `stderrActivity` | Log lines that mark a step of the running turn (below). |
 | `models`, `modelArgs` | A model catalog and the spawn args applying it, only for an agent that reports no model selector. |
 | `permissions.allow` | Tool kinds the adapter approves (below). |
 | `idleTimeout` | Stop an idle session's process after this long (it resumes on the next message). |
@@ -95,6 +96,25 @@ the reason and offers no target; nothing else breaks.
   agent's title, else its kind and file name; one line, at most 120
   characters, never contents), and the agent thinking or writing as one
   `thinking` / `text` step each.
+- **Waiting the agent only logs:** some agents report a state of the turn
+  only in their log, never over ACP. OpenCode, when the model provider
+  refuses a call (a rate limit, an overloaded provider), waits out the
+  provider's `retry-after` and retries on its own, sending the client
+  nothing meanwhile, so the room saw a running turn doing nothing for many
+  minutes. An agent's `stderrActivity` rules turn such lines of its stderr
+  into a step of the running turn: `{"match": "<RE2 regexp>", "title":
+  "<step title>"}`, the first matching rule wins, and the step shows the
+  rule's own title (one line, at most 120 characters), never the matched
+  line (stderr stays local). For OpenCode, print its log to stderr
+  (`"args": ["acp", "--print-logs", "--log-level", "WARN"]`) and add:
+
+  ```json
+  "stderrActivity": [
+    { "match": "message=\"stream error\".*(?i)(rate limit|too many requests|: 429\\))",
+      "title": "Waiting for the model: rate-limited, the agent retries on its own" },
+    { "match": "message=\"stream error\"", "title": "The model call failed; the agent retries if it can" }
+  ]
+  ```
 - **Deliverables:** files the agent writes in the workspace appear in the room.
 - **Idle and crashes:** an idle process stops after `idleTimeout` and resumes
   the same session on the next message when the agent supports
@@ -142,10 +162,19 @@ directory). Mappings known to work:
   the list is always the agent's own answer, refreshed with its catalog.
 - **MCP servers** are added to the agent's configured `mcpServers`. An http or
   sse server goes only to an agent whose `initialize` reports
-  `mcpCapabilities.http` / `.sse`; otherwise it is dropped with a warning
-  naming the server. A profile server with the same name as a configured one
-  is refused (the session fails with a bad request) rather than silently
-  replacing either.
+  `mcpCapabilities.http` / `.sse`; a stdio server only when its command
+  resolves the way the agent starts it (an absolute or workspace-relative
+  path to an executable file, or a bare name on the `PATH` of the agent's
+  env or the server's own); with `mcp: false` none is passed. A profile
+  server with the same name as a configured one is refused (the session
+  fails with a bad request) rather than silently replacing either.
+- **Missing tools are said, not silent.** A profile server that is not
+  passed is logged (its name and why, never its env or headers), the next
+  prompt of the ACP session starts with a note telling the agent which tools
+  it does not have and why (once per change; a fresh conversation is told
+  again), and the turn shows the room a step "Tools not attached: …". An
+  agent that accepts a server and then fails to start it without saying so
+  over ACP (OpenCode ignores such failures) cannot be detected here.
 - **Secrets** (env values, MCP header and env values) are never logged and
   never written to disk; they live only in the session's memory and the agent
   process environment.

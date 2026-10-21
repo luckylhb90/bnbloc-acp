@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,6 +23,9 @@ import (
 //	ACP_FAKE_NO_MODELS=1  no config options
 //	ACP_FAKE_DIE=1      print to stderr and exit before answering anything
 //	ACP_FAKE_MCP_HTTP=1 mcpCapabilities.http (and .sse)
+//
+// Tests run with a stub MCP server command, mcp-tools, installed on PATH
+// (the profile fixtures' stdio server); mcp-missing is never installed.
 func TestMain(m *testing.M) {
 	if os.Getenv("ACP_FAKE_AGENT") == "1" {
 		if os.Getenv("ACP_FAKE_DIE") == "1" {
@@ -31,7 +36,23 @@ func TestMain(m *testing.M) {
 			model: "fake-small", effort: "low", mode: "default"}).serve()
 		os.Exit(0)
 	}
-	os.Exit(m.Run())
+	bin, err := os.MkdirTemp("", "bnbloc-acp-bin")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	stub := filepath.Join(bin, "mcp-tools")
+	if runtime.GOOS == "windows" {
+		stub += ".exe"
+	}
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	os.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	code := m.Run()
+	os.RemoveAll(bin)
+	os.Exit(code)
 }
 
 type fakeAgent struct {
@@ -243,9 +264,15 @@ func (f *fakeAgent) text(s string, msgID string) {
 }
 
 func (f *fakeAgent) prompt(id json.RawMessage, p map[string]any) {
+	// The last block is the command (a note the adapter adds comes first).
 	var text string
+	var all []string
 	if blocks, ok := p["prompt"].([]any); ok && len(blocks) > 0 {
-		text, _ = blocks[0].(map[string]any)["text"].(string)
+		for _, b := range blocks {
+			t, _ := b.(map[string]any)["text"].(string)
+			all = append(all, t)
+		}
+		text = all[len(all)-1]
 	}
 	f.mu.Lock()
 	f.turns++
@@ -288,6 +315,16 @@ func (f *fakeAgent) prompt(id json.RawMessage, p map[string]any) {
 		f.update(map[string]any{"sessionUpdate": "tool_call", "toolCallId": "c10", "kind": "read", "locations": []any{map[string]any{"path": "/w/deck/template.pptx"}}, "status": "pending"})
 		f.text("writing the answer", "")
 		f.text(" now", "")
+		<-cancel
+		f.reply(id, map[string]any{"stopReason": "cancelled"})
+	case "blocks":
+		// The prompt's text blocks, joined.
+		f.text(strings.Join(all, " | "), "")
+		end("end_turn")
+	case "stderrwait":
+		// Logs a line to stderr, then works until cancelled.
+		fmt.Fprintln(os.Stderr, arg)
+		f.text("working", "")
 		<-cancel
 		f.reply(id, map[string]any{"stopReason": "cancelled"})
 	case "slow":

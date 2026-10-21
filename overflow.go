@@ -68,7 +68,7 @@ func (s *session) startFresh() (*agentProc, error) {
 		}
 		started = true
 	}
-	servers, err := profileMCPServers(s.profile, s.agent, proc.init)
+	servers, err := s.sessionMCPServers(proc, pc)
 	if err == nil {
 		var resp acpSessionResponse
 		if err = proc.call(ctx, methodSessionNew, acpNewSessionRequest{Cwd: s.ws.dir, McpServers: servers, Meta: profileMeta(s.profile, pc)}, &resp); err == nil && resp.SessionID == "" {
@@ -78,6 +78,7 @@ func (s *session) startFresh() (*agentProc, error) {
 			s.mu.Lock()
 			old := s.acpID
 			s.proc, s.acpID, s.fresh = proc, resp.SessionID, false
+			s.mcpTold = "" // a new conversation: tell it of missing tools again
 			s.resumable, s.loadable = proc.init.canResume(), proc.init.AgentCapabilities.LoadSession
 			if len(resp.ConfigOptions) > 0 {
 				s.options = resp.ConfigOptions

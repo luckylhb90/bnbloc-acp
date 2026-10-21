@@ -3,6 +3,7 @@
 package main
 
 import (
+	"os"
 	"os/exec"
 	"syscall"
 )
@@ -33,3 +34,12 @@ func killTree(cmd *exec.Cmd, hard bool) {
 func shellCommand(line string) *exec.Cmd {
 	return exec.Command("/bin/sh", "-c", line)
 }
+
+// executable reports whether path is a file the user may execute.
+func executable(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && st.Mode().IsRegular() && st.Mode().Perm()&0o111 != 0
+}
+
+// envKeyEqual compares environment variable names (case-sensitive here).
+func envKeyEqual(a, b string) bool { return a == b }

@@ -306,20 +306,39 @@ func toACPServer(m core.MCPServer) acpMcpServer {
 // role requires).
 var errMcpClash = errors.New("mcp server name clash")
 
-// profileMCPServers is the session's ACP mcpServers: the agent's configured list
-// plus, when its profile mapping allows MCP, the profile's servers the agent
-// supports (an http/sse server goes only to an agent whose initialize
-// advertised mcpCapabilities.http / .sse; others are dropped with a warning
-// naming the server, never its headers). A profile server named like a
-// configured one is refused (errMcpClash).
-func profileMCPServers(p *core.AgentProfile, a AgentConfig, init acpInitializeResponse) (json.RawMessage, error) {
+// mcpDrop is a profile MCP server the session could not be given, and why
+// (said to the agent and the room: mcpnote.go).
+type mcpDrop struct {
+	Name   string
+	Reason string
+}
+
+// Reasons a profile MCP server is not passed.
+const (
+	dropMCPOff      = "this agent's bnbloc-acp config passes no session MCP servers"
+	dropNoCommand   = "its command was not found on this machine"
+	dropNoTransport = "this agent takes no %s MCP servers"
+)
+
+// profileMCPServers is the session's ACP mcpServers: the agent's configured
+// list plus the profile's servers the agent can be given, and the profile's
+// servers it cannot (drops). A server is dropped when the agent's profile
+// mapping turns MCP off, when it is http/sse and the agent's initialize did
+// not advertise mcpCapabilities.http / .sse, or when it is stdio and its
+// command cannot be found the way the agent would start it (an absolute or
+// workspace-relative path that is no executable file, a bare name in no
+// PATH directory of the agent's or the server's env). Logs name the server,
+// its command and the reason, never its env or header values. A profile server named like a
+// configured one is refused (errMcpClash). dir is the session workspace,
+// env the agent process environment.
+func profileMCPServers(p *core.AgentProfile, a AgentConfig, init acpInitializeResponse, dir string, env []string) (json.RawMessage, []mcpDrop, error) {
 	base := a.mcpServers()
-	if p == nil || len(p.MCPServers) == 0 || !a.effectiveProfileConfig().mcpEnabled() {
-		return base, nil
+	if p == nil || len(p.MCPServers) == 0 {
+		return base, nil, nil
 	}
 	var list []json.RawMessage
 	if err := json.Unmarshal(base, &list); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	configured := map[string]bool{}
 	for _, raw := range list {
@@ -331,21 +350,85 @@ func profileMCPServers(p *core.AgentProfile, a AgentConfig, init acpInitializeRe
 		}
 	}
 	caps := init.AgentCapabilities.McpCapabilities
+	enabled := a.effectiveProfileConfig().mcpEnabled()
+	var drops []mcpDrop
 	for _, m := range p.MCPServers {
 		if configured[m.Name] {
-			return nil, fmt.Errorf("%w: %q is configured for agent %s and also required by the session profile", errMcpClash, m.Name, a.Name)
+			return nil, nil, fmt.Errorf("%w: %q is configured for agent %s and also required by the session profile", errMcpClash, m.Name, a.Name)
 		}
-		if (m.Type == core.MCPHTTP && !caps.HTTP) || (m.Type == core.MCPSSE && !caps.SSE) {
-			slog.Warn("bnbloc-acp dropping an mcp server the agent does not support", "agent", a.Name, "server", m.Name, "type", m.Type)
+		reason := ""
+		switch {
+		case !enabled:
+			reason = dropMCPOff
+		case (m.Type == core.MCPHTTP && !caps.HTTP) || (m.Type == core.MCPSSE && !caps.SSE):
+			reason = fmt.Sprintf(dropNoTransport, m.Type)
+		case m.Transport() == core.MCPStdio && !commandFound(m.Command, dir, env, m.Env):
+			reason = dropNoCommand
+		}
+		if reason != "" {
+			slog.Warn("bnbloc-acp not passing an mcp server to the agent", "agent", a.Name, "server", m.Name, "command", m.Command, "reason", reason)
+			drops = append(drops, mcpDrop{Name: m.Name, Reason: reason})
 			continue
 		}
 		raw, err := json.Marshal(toACPServer(m))
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		list = append(list, raw)
 	}
-	return json.Marshal(list)
+	out, err := json.Marshal(list)
+	return out, drops, err
+}
+
+// commandFound reports whether a stdio MCP server's command resolves the
+// way the agent starts it: a path (absolute, or relative to the workspace,
+// the agent's cwd) must be an executable file; a bare name must be one in a
+// PATH directory of the agent's environment or of the server's own env.
+func commandFound(command, dir string, env []string, serverEnv []core.NameValue) bool {
+	if command == "" {
+		return false
+	}
+	if filepath.IsAbs(command) || strings.ContainsAny(command, `/\`) {
+		if !filepath.IsAbs(command) {
+			command = filepath.Join(dir, command)
+		}
+		return executable(command)
+	}
+	var paths []string
+	if v, ok := envValue(env, "PATH"); ok {
+		paths = append(paths, v)
+	}
+	for _, nv := range serverEnv {
+		if envKeyEqual(nv.Name, "PATH") {
+			paths = append(paths, nv.Value)
+		}
+	}
+	for _, path := range paths {
+		for _, d := range filepath.SplitList(path) {
+			if d == "" {
+				continue
+			}
+			if !filepath.IsAbs(d) {
+				d = filepath.Join(dir, d)
+			}
+			if executable(filepath.Join(d, command)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// envValue is the effective value of key in env: the last entry wins, as in
+// os/exec.
+func envValue(env []string, key string) (string, bool) {
+	for i := len(env) - 1; i >= 0; i-- {
+		k, v, ok := strings.Cut(env[i], "=")
+		if ok && envKeyEqual(k, key) {
+			return v, true
+		}
+	}
+	return "", false
 }
 
 // writeConfigFile writes one agent-config file of the workspace (the

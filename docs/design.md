@@ -93,6 +93,7 @@ One JSON file, read at start and re-read when it changes:
 | `authMethod` | Optional ACP auth method id the adapter passes to `authenticate` before creating sessions, for agents that require it (the method must work non-interactively, e.g. reuse the CLI's stored login). |
 | `mode` | Optional ACP session mode id applied to every session (e.g. an agent's "accept edits" mode). |
 | `mcpServers` | Optional ACP `McpServer` list passed to every session verbatim. |
+| `stderrActivity` | Optional rules `{match, title}`: a line of the agent's stderr matching `match` (RE2) during a turn adds the step `title` to the turn's activity (first match wins; the title is the rule's text, never the line). For agents that report a wait only in their log, e.g. OpenCode waiting out a model rate limit. |
 | `models`, `modelArgs` | Override used **only when the agent reports no model selector**: the catalog to show, and the args appended at spawn with `{model}` replaced by the chosen model. Both or neither. |
 | `permissions.allow` | Tool kinds the adapter approves (below). |
 | `idleTimeout` | How long an idle session keeps its agent process (default `30m`, `0` = forever). |
@@ -200,7 +201,7 @@ request the agent makes of the client is answered by policy:
   nothing.
 - The agent's stderr stays local (adapter log, `bnbloc-acp check`): it is
   arbitrary output, so it never reaches an error that can be posted to a
-  room.
+  room. A `stderrActivity` rule only selects its own fixed title.
 
 The policy governs what an agent asks of its client. An agent can still act
 natively (its own file and shell tools) under its own approval settings;

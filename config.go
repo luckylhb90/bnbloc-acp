@@ -45,6 +45,10 @@ type AgentConfig struct {
 	// Profile maps a session's agent profile (an expert's instructions,
 	// skills, MCP servers) onto this agent; nil = defaultProfileConfig.
 	Profile *ProfileConfig `json:"profile,omitempty"`
+	// StderrActivity marks steps of a running turn that the agent reports
+	// only in its log (stderr), e.g. waiting out a model rate limit
+	// (stderr.go).
+	StderrActivity []StderrRule `json:"stderrActivity,omitempty"`
 }
 
 // Permissions is the agent's request policy (policy.go).
@@ -137,6 +141,11 @@ func (c *Config) validate() error {
 		if a.Profile != nil {
 			if err := a.effectiveProfileConfig().validate(); err != nil {
 				return fmt.Errorf("agent %q: %w", a.Name, err)
+			}
+		}
+		for j := range a.StderrActivity {
+			if err := a.StderrActivity[j].compile(); err != nil {
+				return fmt.Errorf("agent %q: stderrActivity[%d]: %w", a.Name, j, err)
 			}
 		}
 		for _, k := range a.Permissions.Allow {

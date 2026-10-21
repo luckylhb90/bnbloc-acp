@@ -99,6 +99,10 @@ type session struct {
 	startedAt   time.Time
 	activity    []turnActivity
 	deadlineHit bool
+	// mcpDrops are the profile MCP servers the current ACP session could not
+	// be given, and mcpTold the last set the agent was told of (mcpnote.go).
+	mcpDrops []mcpDrop
+	mcpTold  string
 
 	terminals map[string]*terminal
 }
@@ -131,7 +135,7 @@ func (s *session) open(ctx context.Context, first turnInput) error {
 	if err != nil {
 		return err
 	}
-	servers, err := profileMCPServers(s.profile, s.agent, proc.init)
+	servers, err := s.sessionMCPServers(proc, pc)
 	if err != nil {
 		proc.stop()
 		return err
@@ -304,7 +308,11 @@ func (s *session) turn(in turnInput) {
 	}
 	var resp acpPromptResponse
 	if err == nil && !s.isCancelled() {
-		err = proc.call(s.ctx, methodSessionPrompt, acpPromptRequest{SessionID: s.acpID, Prompt: []acpContentBlock{{Type: "text", Text: in.text}}}, &resp)
+		prompt := []acpContentBlock{{Type: "text", Text: in.text}}
+		if note := s.takeMCPNote(); note != "" {
+			prompt = append([]acpContentBlock{{Type: "text", Text: note}}, prompt...)
+		}
+		err = proc.call(s.ctx, methodSessionPrompt, acpPromptRequest{SessionID: s.acpID, Prompt: prompt}, &resp)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -471,7 +479,7 @@ func (s *session) ensureProc() (*agentProc, error) {
 		s.markLost()
 		return nil, err
 	}
-	servers, err := profileMCPServers(s.profile, s.agent, proc.init)
+	servers, err := s.sessionMCPServers(proc, pc)
 	if err != nil {
 		proc.stop()
 		s.markLost()

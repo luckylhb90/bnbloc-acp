@@ -29,6 +29,8 @@ type agentProc struct {
 	stderr *tailBuffer
 	// stderrDone closes when the agent's stderr reached EOF.
 	stderrDone chan struct{}
+	// onStderr reads each stderr line too (nil = none; stderr.go).
+	onStderr func(line string)
 }
 
 // startAgent spawns the agent in dir, runs initialize (advertising the
@@ -75,6 +77,9 @@ func startAgent(ctx context.Context, a AgentConfig, args []string, dir string, h
 	outW.Close()
 	errW.Close()
 	p := &agentProc{name: a.Name, cmd: cmd, stdin: inW, exited: make(chan struct{}), stderr: &tailBuffer{max: 4 << 10}, stderrDone: make(chan struct{})}
+	if o, ok := h.(stderrObserver); ok && len(a.StderrActivity) > 0 {
+		p.onStderr = o.agentStderr
+	}
 	go p.logStderr(errR)
 	p.conn = newRPCConn(outR, inW, h, a.Name)
 	go func() {
@@ -169,6 +174,9 @@ func (p *agentProc) logStderr(f *os.File) {
 		line := sc.Text()
 		p.stderr.add(line)
 		slog.Debug("bnbloc-acp agent stderr", "agent", p.name, "line", truncate(line, 500))
+		if p.onStderr != nil {
+			p.onStderr(line)
+		}
 	}
 }
 

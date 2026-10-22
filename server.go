@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,22 +28,15 @@ const adapterVersion = "0.1.0"
 // the largest).
 const maxBodyBytes = 32 << 20
 
-// capabilities are the optional Core Protocol capabilities the adapter
-// serves; agentProfile is mapped per agent (profile.go). Not sandboxExec: an ACP agent may run shell commands itself rather
-// than through client terminals, so the adapter cannot route every command
-// into a sandbox space (docs/prd/2026-10-11-acp-core.md "Sandbox").
-var capabilities = []string{
-	protocol.CapabilityInterrupt, protocol.CapabilityWriteFile, protocol.CapabilityDeleteWorkspace,
-	protocol.CapabilitySessionFiles, protocol.CapabilitySessionFileBytes, protocol.CapabilityAgentProfile,
-	capabilityTurnActivity,
-}
-
 // adapter serves Core Protocol v1 over the configured ACP agents.
 type adapter struct {
 	name  string
 	token string
 	ws    *workspaces
 	reg   *registry
+	// sandbox is where sandboxed sessions keep their token files and the
+	// routing's config (sandbox.go).
+	sandbox sandboxHost
 
 	mu       sync.Mutex
 	sessions map[string]*session
@@ -50,7 +44,10 @@ type adapter struct {
 }
 
 func newAdapter(name, token string, ws *workspaces, reg *registry) *adapter {
-	return &adapter{name: name, token: token, ws: ws, reg: reg, sessions: map[string]*session{}, order: map[string][]string{}}
+	// Beside the workspaces root: the adapter's home holds both.
+	home := filepath.Dir(ws.root)
+	return &adapter{name: name, token: token, ws: ws, reg: reg, sandbox: sandboxHost{stateDir: filepath.Join(home, "sandbox"), home: home},
+		sessions: map[string]*session{}, order: map[string][]string{}}
 }
 
 // apiError is a Core Protocol error envelope with its HTTP status.
@@ -77,9 +74,7 @@ func (a *adapter) handler() http.Handler {
 	mux.HandleFunc("PUT /core/v1/workspaces/{ws}/files/{path...}", a.writeFile)
 	mux.HandleFunc("GET /core/v1/workspaces/{ws}/files/{path...}", a.readFile)
 	mux.HandleFunc("POST /core/v1/workspaces/{ws}/sessions", a.createSession)
-	mux.HandleFunc("GET /core/v1/workspaces/{ws}/sessions/latest", a.latestSession)
 	mux.HandleFunc("POST /core/v1/workspaces/{ws}/sessions/{sid}/input", a.sendInput)
-	mux.HandleFunc("GET /core/v1/workspaces/{ws}/sessions/{sid}/idle", a.sessionIdle)
 	mux.HandleFunc("GET /core/v1/workspaces/{ws}/sessions/{sid}/turn", a.pollTurn)
 	mux.HandleFunc("GET /core/v1/workspaces/{ws}/sessions/{sid}/messages", a.messages)
 	mux.HandleFunc("POST /core/v1/workspaces/{ws}/sessions/{sid}/interrupt", a.interrupt)
@@ -111,7 +106,7 @@ func (a *adapter) discover(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, protocol.Discovery{
 		Name: a.name, Version: adapterVersion,
 		Protocol:     protocol.ProtocolRange{Min: protocol.SupportedMinVersion, Max: protocol.SupportedMaxVersion},
-		Capabilities: capabilities,
+		Capabilities: serverCapabilities(),
 		Limits:       protocol.Limits{MaxInputBytes: maxBodyBytes},
 	})
 }
@@ -132,11 +127,21 @@ func (a *adapter) createWorkspace(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	var id string
+	var err error
 	if req.Workdir != "" {
-		writeErr(w, errf(http.StatusBadRequest, protocol.ErrorBadRequest, "this core does not support sandbox execution (no workdir workspaces)"))
-		return
+		// A sandbox workdir the bridge made: adopted, never owned.
+		if !sandboxHere() {
+			writeErr(w, errf(http.StatusBadRequest, protocol.ErrorBadRequest, "this machine cannot run the agent sandbox (macOS and Linux only)"))
+			return
+		}
+		if id, err = a.ws.createAt(req.Workdir); errors.Is(err, errBadPath) {
+			writeErr(w, errf(http.StatusBadRequest, protocol.ErrorBadRequest, err.Error()))
+			return
+		}
+	} else {
+		id, err = a.ws.create()
 	}
-	id, err := a.ws.create()
 	if err != nil {
 		writeErr(w, internalErr("create workspace", err))
 		return
@@ -232,10 +237,6 @@ func (a *adapter) createSession(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	if req.Execution != nil {
-		writeErr(w, errf(http.StatusBadRequest, protocol.ErrorBadRequest, "this core does not support sandbox execution"))
-		return
-	}
 	prof, err := req.Profile.Core()
 	if err != nil {
 		writeErr(w, errf(http.StatusBadRequest, protocol.ErrorBadRequest, err.Error()))
@@ -246,11 +247,23 @@ func (a *adapter) createSession(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, aerr)
 		return
 	}
+	exe, err := checkExecution(agent, ws, req.Execution)
+	if err != nil {
+		writeErr(w, errf(http.StatusBadRequest, protocol.ErrorBadRequest, err.Error()))
+		return
+	}
 	s := newSession(newID("s-"), wsID, ws, agent, a.reg)
 	s.profile = prof
+	s.sbHost = a.sandbox
+	if exe != nil {
+		if err := s.setExecution(*exe); err != nil {
+			writeErr(w, internalErr("sandbox exec token", err))
+			return
+		}
+	}
 	if err := s.open(r.Context(), turnInput{text: req.Prompt, opts: req.Options, deadline: deadlineOf(req.DeadlineMs)}); err != nil {
 		slog.Warn("bnbloc-acp session start failed", "agent", agent.Name, "error", err)
-		if errors.Is(err, errSessionOption) || errors.Is(err, errMcpClash) || errors.Is(err, errBadPath) || errors.Is(err, errOutsideWorkspace) {
+		if errors.Is(err, errSessionOption) || errors.Is(err, errMcpClash) || errors.Is(err, errBadPath) || errors.Is(err, errOutsideWorkspace) || errors.Is(err, errSandboxRefused) {
 			writeErr(w, errf(http.StatusBadRequest, protocol.ErrorBadRequest, agent.Name+": "+err.Error()))
 			return
 		}
@@ -283,22 +296,6 @@ func (a *adapter) pickAgent(target string) (AgentConfig, *apiError) {
 	return agent, nil
 }
 
-func (a *adapter) latestSession(w http.ResponseWriter, r *http.Request) {
-	wsID := r.PathValue("ws")
-	if _, err := a.ws.get(wsID); err != nil {
-		writeErr(w, wsNotFound())
-		return
-	}
-	a.mu.Lock()
-	ids := a.order[wsID]
-	latest := ""
-	if len(ids) > 0 {
-		latest = ids[len(ids)-1]
-	}
-	a.mu.Unlock()
-	writeJSON(w, http.StatusOK, protocol.LatestSessionResponse{SessionID: latest})
-}
-
 func (a *adapter) session(r *http.Request) (*session, *apiError) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -320,24 +317,35 @@ func (a *adapter) sendInput(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	if req.Execution != nil {
-		writeErr(w, errf(http.StatusBadRequest, protocol.ErrorBadRequest, "this core does not support sandbox execution"))
+	// A session runs where it started: a sandboxed one takes only inputs that
+	// carry its descriptor (the exec token is renewed with each), and a host
+	// one takes none.
+	s.mu.Lock()
+	sandboxed := s.sandboxed
+	s.mu.Unlock()
+	switch {
+	case req.Execution == nil && sandboxed:
+		writeErr(w, errf(http.StatusBadRequest, protocol.ErrorBadRequest, "this session runs in the sandbox: its input must carry the execution descriptor"))
 		return
+	case req.Execution != nil && !sandboxed:
+		writeErr(w, errf(http.StatusBadRequest, protocol.ErrorBadRequest, "this session runs on the host and cannot move into the sandbox"))
+		return
+	case req.Execution != nil:
+		exe, err := checkExecution(s.agent, s.ws, req.Execution)
+		if err != nil {
+			writeErr(w, errf(http.StatusBadRequest, protocol.ErrorBadRequest, err.Error()))
+			return
+		}
+		if err := s.setExecution(*exe); err != nil {
+			writeErr(w, internalErr("sandbox exec token", err))
+			return
+		}
 	}
 	if err := s.enqueue(turnInput{text: req.Text, opts: req.Options, deadline: deadlineOf(req.DeadlineMs)}); err != nil {
 		writeErr(w, errf(http.StatusNotFound, protocol.ErrorSessionNotFound, err.Error()))
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-
-func (a *adapter) sessionIdle(w http.ResponseWriter, r *http.Request) {
-	s, aerr := a.session(r)
-	if aerr != nil {
-		writeErr(w, aerr)
-		return
-	}
-	writeJSON(w, http.StatusOK, protocol.SessionIdleResponse{Idle: s.idle()})
 }
 
 func (a *adapter) pollTurn(w http.ResponseWriter, r *http.Request) {
@@ -483,5 +491,14 @@ func writeErr(w http.ResponseWriter, err error) {
 	if !errors.As(err, &e) {
 		e = internalErr("request", err)
 	}
-	writeJSON(w, e.status, protocol.ErrorEnvelope{Error: protocol.ProtocolError{Code: e.code, Message: e.msg, Retryable: e.retryable}})
+	writeJSON(w, e.status, protocol.ErrorEnvelope{Error: protocol.ProtocolError{Code: e.code, Message: e.msg, Retryable: retryableField(e.retryable)}})
+}
+
+// retryableField is the envelope's optional retryable hint: set only when the
+// error is retryable (an unset hint lets a 429/503 be retried by default).
+func retryableField(retryable bool) *bool {
+	if !retryable {
+		return nil
+	}
+	return &retryable
 }

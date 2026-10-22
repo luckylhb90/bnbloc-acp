@@ -76,6 +76,8 @@ type fakeAgent struct {
 	// session/new, session/resume or session/load.
 	lastMeta json.RawMessage
 	lastMcp  json.RawMessage
+	// terminal is whether the client offered the terminal capability.
+	terminal bool
 }
 
 func (f *fakeAgent) serve() {
@@ -185,6 +187,11 @@ func (f *fakeAgent) request(id json.RawMessage, method string, params json.RawMe
 	}
 	switch method {
 	case "initialize":
+		if cc, ok := p["clientCapabilities"].(map[string]any); ok {
+			f.mu.Lock()
+			f.terminal = cc["terminal"] == true
+			f.mu.Unlock()
+		}
 		caps := map[string]any{"loadSession": os.Getenv("ACP_FAKE_LOAD") == "1", "sessionCapabilities": map[string]any{}}
 		if os.Getenv("ACP_FAKE_MCP_HTTP") == "1" {
 			caps["mcpCapabilities"] = map[string]any{"http": true, "sse": true}
@@ -383,6 +390,44 @@ func (f *fakeAgent) prompt(id json.RawMessage, p map[string]any) {
 			}
 		}
 		f.text(out, "")
+		end("end_turn")
+	case "sandboxinfo":
+		// What the process was started with: where, as whom, with which
+		// descriptor (the token as the environment and as the file say it).
+		cwd, _ := os.Getwd()
+		tokenFile := os.Getenv("BNBLOC_VMEXEC_TOKEN_FILE")
+		raw, _ := os.ReadFile(tokenFile)
+		f.mu.Lock()
+		terminal := f.terminal
+		f.mu.Unlock()
+		info, _ := json.Marshal(map[string]any{
+			"pid": os.Getpid(), "cwd": cwd, "pwd": os.Getenv("PWD"), "terminal": terminal,
+			"tokenEnv": os.Getenv("BNBLOC_VMEXEC_TOKEN"), "tokenFile": tokenFile, "token": string(raw),
+			"config": os.Getenv("OPENCODE_CONFIG_DIR"), "space": os.Getenv("BNBLOC_VMEXEC_SPACE"),
+			"denyRead": os.Getenv("BNBLOC_CONFINE_DENY_READ"), "acpEnvLeak": os.Getenv("BNBLOC_ACP_TOKEN") != "",
+		})
+		f.text(string(info), "")
+		end("end_turn")
+	case "fsprobe":
+		// fsprobe WORKSPACE|OUTSIDE|HOMEFILE|TOKENFILE: what the process may do.
+		parts := strings.Split(arg, "|")
+		res := map[string]string{}
+		try := func(name string, err error) {
+			if err == nil {
+				res[name] = "ok"
+			} else {
+				res[name] = err.Error()
+			}
+		}
+		try("writeWorkspace", os.WriteFile(filepath.Join(parts[0], "probe.txt"), []byte("x"), 0o600))
+		try("writeOutside", os.WriteFile(parts[1], []byte("x"), 0o600))
+		_, err := os.ReadFile(parts[2])
+		try("readHome", err)
+		_, err = os.ReadFile(parts[3])
+		try("readToken", err)
+		try("writeToken", os.WriteFile(parts[3], []byte("hijacked"), 0o600))
+		out, _ := json.Marshal(res)
+		f.text(string(out), "")
 		end("end_turn")
 	case "permission":
 		kind, path, _ := strings.Cut(arg, " ")

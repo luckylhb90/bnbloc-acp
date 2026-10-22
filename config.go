@@ -49,6 +49,11 @@ type AgentConfig struct {
 	// only in its log (stderr), e.g. waiting out a model rate limit
 	// (stderr.go).
 	StderrActivity []StderrRule `json:"stderrActivity,omitempty"`
+	// Sandbox names the routing this agent's CLI has for running its shell
+	// commands in the agent sandbox's space ("opencode"; sandbox.go). Empty:
+	// the agent cannot run sandboxed, and a sandboxed request for it is
+	// refused. Operator data like the rest: never a default for a command name.
+	Sandbox string `json:"sandbox,omitempty"`
 }
 
 // Permissions is the agent's request policy (policy.go).
@@ -147,6 +152,9 @@ func (c *Config) validate() error {
 			if err := a.StderrActivity[j].compile(); err != nil {
 				return fmt.Errorf("agent %q: stderrActivity[%d]: %w", a.Name, j, err)
 			}
+		}
+		if !validSandboxRouting(a.Sandbox) {
+			return fmt.Errorf("agent %q: sandbox %q is not a routing this core implements (%s)", a.Name, a.Sandbox, sandboxRoutingOpencode)
 		}
 		for _, k := range a.Permissions.Allow {
 			if k != "*" && !toolKinds[k] {

@@ -109,7 +109,12 @@ type profileRecord struct {
 	SkillsDir string `json:"skillsDir,omitempty"`
 }
 
-func (ws workspaceRoot) profileRecordPath() string { return ws.dir + ".profile.json" }
+func (ws workspaceRoot) profileRecordPath() string {
+	if ws.recordBase != "" {
+		return ws.recordBase + ".profile.json"
+	}
+	return ws.dir + ".profile.json"
+}
 
 // readProfileRecord returns the workspace's record; a missing or unreadable
 // one is empty, and a path that is not an agent-config path is dropped (the

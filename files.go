@@ -58,10 +58,50 @@ func (w *workspaces) create() (string, error) {
 	return id, nil
 }
 
+// workdirRecordPath names the file that makes a workspace id stand for a
+// directory the core does not own.
+func (w *workspaces) workdirRecordPath(id string) string {
+	return filepath.Join(w.root, id+".workdir")
+}
+
+// createAt makes a workspace of an existing directory (a sandbox workdir the
+// bridge created): absolute, a directory, kept as a record beside the
+// workspaces root. The core never owns it.
+func (w *workspaces) createAt(workdir string) (string, error) {
+	if !filepath.IsAbs(workdir) {
+		return "", fmt.Errorf("%w: the workdir %q is not absolute", errBadPath, workdir)
+	}
+	real, err := filepath.EvalSymlinks(filepath.Clean(workdir))
+	if err != nil {
+		return "", fmt.Errorf("%w: the workdir %q: %v", errBadPath, workdir, err)
+	}
+	if st, err := os.Stat(real); err != nil || !st.IsDir() {
+		return "", fmt.Errorf("%w: the workdir %q is not a directory", errBadPath, workdir)
+	}
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	id := hex.EncodeToString(b[:])
+	if err := os.WriteFile(w.workdirRecordPath(id), []byte(real), 0o600); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
 // get returns an existing workspace's root.
 func (w *workspaces) get(id string) (workspaceRoot, error) {
 	if !workspaceIDRE.MatchString(id) {
 		return workspaceRoot{}, errWorkspaceNotFound
+	}
+	if raw, err := os.ReadFile(w.workdirRecordPath(id)); err == nil {
+		dir := strings.TrimSpace(string(raw))
+		if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+			return workspaceRoot{}, errWorkspaceNotFound
+		}
+		ws, err := newWorkspaceRoot(dir)
+		ws.workdirBacked, ws.recordBase = true, filepath.Join(w.root, id)
+		return ws, err
 	}
 	dir := filepath.Join(w.root, id)
 	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
@@ -75,7 +115,13 @@ func (w *workspaces) remove(id string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.RemoveAll(ws.dir); err != nil {
+	if ws.workdirBacked {
+		// The directory is the bridge's and the sandbox's: only what the core
+		// keeps about it goes.
+		if err := os.Remove(w.workdirRecordPath(id)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	} else if err := os.RemoveAll(ws.dir); err != nil {
 		return err
 	}
 	if err := os.Remove(ws.profileRecordPath()); err != nil && !os.IsNotExist(err) {
@@ -117,7 +163,7 @@ func (ws workspaceRoot) writeWorkspaceFile(rel string, content []byte) error {
 		return err
 	}
 	if !core.WorkspaceFileAllowed(rel) {
-		return fmt.Errorf("%w: workspace files live under %s or the agent-config paths (%s)", errBadPath, core.RoomContextDir, strings.Join(core.AgentConfigPaths, ", "))
+		return fmt.Errorf("%w: workspace files live under %s or the agent-config paths (%s)", errBadPath, core.RoomContextDir, strings.Join(core.BnblocOwnedPaths, ", "))
 	}
 	return ws.writeAllowed(rel, content)
 }
@@ -171,7 +217,7 @@ func (ws workspaceRoot) listFiles() ([]protocol.SessionFile, bool, error) {
 			return nil
 		}
 		rel, err := filepath.Rel(ws.real, p)
-		if err != nil || core.IsAgentConfigPath(filepath.ToSlash(rel)) {
+		if err != nil || core.ProtectedWorkspacePath(filepath.ToSlash(rel)) {
 			return nil
 		}
 		files = append(files, protocol.SessionFile{Path: filepath.ToSlash(rel), SizeBytes: info.Size(), ModTimeMs: info.ModTime().UnixMilli()})

@@ -181,17 +181,22 @@ func check(o options, out io.Writer) error {
 	}
 	wg.Wait()
 	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "AGENT\tSTATUS\tMODELS\tREASONING")
+	fmt.Fprintln(tw, "AGENT\tSTATUS\tMODELS\tREASONING\tSANDBOX")
 	for i, st := range results {
+		routing, note := cfg.Agents[i].sandboxStatus()
+		sandbox := "no: " + note
+		if routing != "" {
+			sandbox = "yes (" + routing + ")"
+		}
 		if !st.Available {
-			fmt.Fprintf(tw, "%s\tunavailable: %s\t\t\n", st.Name, st.Reason)
+			fmt.Fprintf(tw, "%s\tunavailable: %s\t\t\t%s\n", st.Name, st.Reason, sandbox)
 			continue
 		}
 		models := describeCatalog(st.Models, st.DefaultModel)
 		if !st.ModelSelector && len(cfg.Agents[i].Models) > 0 {
 			models = describeCatalog(cfg.Agents[i].Models, "") + " (from config)"
 		}
-		fmt.Fprintf(tw, "%s\tavailable\t%s\t%s\n", st.Name, models, describeCatalog(st.ReasoningEfforts, st.DefaultReasoning))
+		fmt.Fprintf(tw, "%s\tavailable\t%s\t%s\t%s\n", st.Name, models, describeCatalog(st.ReasoningEfforts, st.DefaultReasoning), sandbox)
 	}
 	return tw.Flush()
 }

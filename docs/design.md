@@ -210,17 +210,32 @@ operator tightens that.
 
 ## Sandbox integration
 
-Not advertised. `sandboxExec` promises that the CLI runs confined to the
-sandbox workdir and that its shell commands run in the room's space. The
-adapter could confine the agent process with `bnbloc-vmexec confine` and run
-`terminal/*` through `bnbloc-vmexec run`, but an ACP agent may execute shell
-commands itself instead of through client terminals, and a generic adapter
-cannot force that routing. So the ACP core does not claim `sandboxExec`; the
-bridge's policy then runs a borrowed drive on the host, or refuses it when
-the tenant requires sandboxed borrowing (`requireSandboxForBorrow`). A
-request carrying `execution` (or a workspace `workdir`) is refused with
-`bad_request`. Follow-up: a per-agent opt-in for agents that route every
-shell command through client terminals.
+Advertised (`sandboxExec`, where `bnbloc-vmexec` can confine: macOS and Linux)
+and answered per agent. The design is `docs/prd/2026-10-22-acp-sandbox.md` in
+the bnbloc repository; it replaces the earlier decision not to advertise, which
+rested on one fact: an ACP agent may run shell commands itself rather than
+through client terminals, so a generic adapter cannot force the routing of its
+commands into a space. That is true of the routing and not of the confinement:
+the OS sandbox covers the agent process and everything it spawns.
+
+- An agent is configured with the routing its CLI has (`sandbox`, one today:
+  `opencode`, a `tool.execute.before` plugin that hands the bash tool's command
+  to `vmexec hook opencode`). An agent without one cannot run sandboxed; the
+  request is refused and nothing runs on the host.
+- The workspace is the sandbox workdir the bridge created
+  (`CreateWorkspaceRequest.workdir`), adopted, never owned: delete forgets the
+  record and leaves the directory. A workdir workspace takes only sandboxed
+  sessions and `execution.sandbox.workdir` must be it.
+- The agent is started `vmexec confine --harness … -- <agent> <args>` in the
+  workdir with the descriptor's environment (`protocol.VMExecEnv`), the token
+  only as a file renewed at every input, `PWD` set, the adapter's home
+  read-denied (its own token directory re-allowed) and the routing's config
+  directory write-denied. The client terminal capability is not offered.
+- The session pins what a spawn depends on (the descriptor but for the token): an
+  input with another pin continues the session in a new process (resume or load),
+  or is refused when the agent can do neither.
+- Known limit: commands that do not go through the routing's hook (a subagent, an
+  MCP server that runs commands) are confined but run on the host.
 
 ## Model catalogs
 

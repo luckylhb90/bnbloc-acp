@@ -48,7 +48,12 @@ type harness struct {
 
 func newHarness(t *testing.T, cfg Config) *harness {
 	t.Helper()
-	home := t.TempDir()
+	return newHarnessAt(t, cfg, t.TempDir())
+}
+
+// newHarnessAt is newHarness with the adapter's home in a given directory.
+func newHarnessAt(t *testing.T, cfg Config, home string) *harness {
+	t.Helper()
 	raw, err := json.Marshal(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -129,11 +134,11 @@ func (h *harness) settle(ws, sid string) core.TurnStatus {
 	h.t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
-		if idle, err := h.client.SessionIdle(h.ctx(), h.ep, ws, sid); err == nil && idle {
-			ts, err := h.client.PollTurn(h.ctx(), h.ep, ws, sid)
-			if err != nil {
-				h.t.Fatalf("PollTurn: %v", err)
-			}
+		ts, err := h.client.PollTurn(h.ctx(), h.ep, ws, sid)
+		if err != nil {
+			h.t.Fatalf("PollTurn: %v", err)
+		}
+		if ts.Idle {
 			return ts
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -280,10 +285,6 @@ func TestMessagesAggregateIntoCompletedReplies(t *testing.T) {
 	if strings.Join(texts(rest), "|") != "alpha|beta|answer" || rest[2].Thinking != "pondering" {
 		t.Fatalf("rest = %+v", rest)
 	}
-	latest, err := h.client.LatestSession(h.ctx(), h.ep, ws)
-	if err != nil || latest != sid {
-		t.Fatalf("LatestSession = %q, %v", latest, err)
-	}
 }
 
 func TestInputDuringATurnIsQueued(t *testing.T) {
@@ -304,7 +305,7 @@ func TestInterruptCancelsTheTurnAndDropsQueuedInput(t *testing.T) {
 	sid := h.session(ws, "fake", "slow", core.SessionOptions{})
 	h.send(ws, sid, "hello", core.SessionOptions{})
 	time.Sleep(100 * time.Millisecond)
-	if idle, _ := h.client.SessionIdle(h.ctx(), h.ep, ws, sid); idle {
+	if ts, _ := h.client.PollTurn(h.ctx(), h.ep, ws, sid); ts.Idle {
 		t.Fatal("a running turn reported idle")
 	}
 	if err := h.client.Interrupt(h.ctx(), h.ep, ws, sid); err != nil {
@@ -349,26 +350,28 @@ func TestFailedTurnsAreReported(t *testing.T) {
 // raw wire (failCode is not in the typed client's TurnStatus).
 func (h *harness) rawPoll(ws, sid string) turnStatus {
 	h.t.Helper()
+	// One poll that reports idle is the status the caller reads: a failed
+	// idle poll is the one that marks a lost session's failure as seen.
 	deadline := time.Now().Add(20 * time.Second)
 	for {
-		if idle, err := h.client.SessionIdle(h.ctx(), h.ep, ws, sid); err == nil && idle {
-			break
+		resp, err := h.srv.Client().Get(h.srv.URL + "/core/v1/workspaces/" + ws + "/sessions/" + sid + "/turn")
+		if err != nil {
+			h.t.Fatal(err)
+		}
+		var ts turnStatus
+		ok := resp.StatusCode == http.StatusOK && json.NewDecoder(resp.Body).Decode(&ts) == nil
+		resp.Body.Close()
+		if !ok {
+			h.t.Fatalf("PollTurn: HTTP %d", resp.StatusCode)
+		}
+		if ts.Idle {
+			return ts
 		}
 		if time.Now().After(deadline) {
 			h.t.Fatal("session never settled")
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	resp, err := h.srv.Client().Get(h.srv.URL + "/core/v1/workspaces/" + ws + "/sessions/" + sid + "/turn")
-	if err != nil {
-		h.t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	var ts turnStatus
-	if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&ts) != nil {
-		h.t.Fatalf("PollTurn: HTTP %d", resp.StatusCode)
-	}
-	return ts
 }
 
 // An errored turn is a failed turn, never a reply: a JSON-RPC error, an
@@ -633,11 +636,11 @@ func TestWorkspaceFilesAndRoomContext(t *testing.T) {
 	if err := h.client.WriteWorkspaceFileBytes(h.ctx(), h.ep, ws, ".room/attachments/a.bin", []byte{0, 1, 2}); err != nil {
 		t.Fatal(err)
 	}
-	var perr *protocol.ProtocolError
-	if err := h.client.WriteWorkspaceFile(h.ctx(), h.ep, ws, "README.md", "x"); !errors.As(err, &perr) || perr.Code != protocol.ErrorBadRequest {
+	// The client's own guard refuses both before any I/O.
+	if err := h.client.WriteWorkspaceFile(h.ctx(), h.ep, ws, "README.md", "x"); !errors.Is(err, core.ErrWorkspacePathNotAllowed) {
 		t.Fatalf("write outside .room = %v", err)
 	}
-	if err := h.client.WriteWorkspaceFile(h.ctx(), h.ep, ws, ".room/../../x", "x"); !errors.As(err, &perr) || perr.Code != protocol.ErrorBadRequest {
+	if err := h.client.WriteWorkspaceFile(h.ctx(), h.ep, ws, ".room/../../x", "x"); !errors.Is(err, core.ErrWorkspacePathNotAllowed) {
 		t.Fatalf("write escaping = %v", err)
 	}
 	sid := h.session(ws, "fake", "write "+filepath.Join(root.dir, "out", "report.md")+" REPORT", core.SessionOptions{})
@@ -662,6 +665,7 @@ func TestWorkspaceFilesAndRoomContext(t *testing.T) {
 	if err != nil || string(raw) != "REPORT" {
 		t.Fatalf("read = %q, %v", raw, err)
 	}
+	var perr *protocol.ProtocolError
 	if _, err := h.client.ReadSessionFile(h.ctx(), h.ep, ws, sid, "missing.txt"); !errors.As(err, &perr) || perr.Code != protocol.ErrorFileNotFound {
 		t.Fatalf("read missing = %v", err)
 	}
@@ -673,31 +677,6 @@ func TestWorkspaceFilesAndRoomContext(t *testing.T) {
 	}
 	if _, err := h.client.PollTurn(h.ctx(), h.ep, ws, sid); !errors.As(err, &perr) || perr.Code != protocol.ErrorSessionNotFound {
 		t.Fatalf("poll after delete = %v", err)
-	}
-}
-
-func TestSandboxExecutionIsRefused(t *testing.T) {
-	h := newHarness(t, Config{Agents: []AgentConfig{fakeAgentConfig(t, "fake", nil)}})
-	if core.Supports(h.ctx(), h.client, h.ep, core.CapabilitySandboxExec) {
-		t.Fatal("sandboxExec must not be advertised")
-	}
-	ws, _ := h.workspace()
-	body := `{"prompt":"hi","execution":{"mode":"sandbox","sandbox":{"url":"http://127.0.0.1:1","execToken":"t","machine":"m","space":"s","workdir":"/tmp"}}}`
-	resp, err := h.srv.Client().Post(h.srv.URL+protocol.WorkspaceSessionsPath(ws), "application/json", strings.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("sandboxed create = %d, want 400", resp.StatusCode)
-	}
-	resp, err = h.srv.Client().Post(h.srv.URL+protocol.PathWorkspaces, "application/json", strings.NewReader(`{"workdir":"/tmp/x"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("workdir workspace = %d, want 400", resp.StatusCode)
 	}
 }
 

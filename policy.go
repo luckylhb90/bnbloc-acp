@@ -89,6 +89,12 @@ var writeKinds = map[string]bool{"edit": true, "delete": true, "move": true}
 type workspaceRoot struct {
 	dir  string
 	real string
+	// workdirBacked: the workspace was made in a sandbox workdir the core does
+	// not own (workspaces.createAt): deleting it forgets it and removes
+	// nothing in the directory. recordBase is where its records live beside the
+	// workspaces root ("" = beside dir, as for an owned workspace).
+	workdirBacked bool
+	recordBase    string
 }
 
 func newWorkspaceRoot(dir string) (workspaceRoot, error) {
@@ -159,7 +165,7 @@ func (w workspaceRoot) resolveWritable(path string) (string, error) {
 	if within(filepath.Join(w.real, core.RoomContextDir), real) {
 		return "", errors.New("the .room/ context is read-only")
 	}
-	if rel, err := filepath.Rel(w.real, real); err == nil && core.IsAgentConfigPath(filepath.ToSlash(rel)) {
+	if rel, err := filepath.Rel(w.real, real); err == nil && core.BnblocOwnedPath(filepath.ToSlash(rel)) {
 		return "", errors.New("the agent configuration files are read-only")
 	}
 	return real, nil

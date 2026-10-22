@@ -38,13 +38,28 @@ type agentProc struct {
 // authenticate, within ctx's deadline. h receives everything the agent sends
 // the client.
 func startAgent(ctx context.Context, a AgentConfig, args []string, dir string, h rpcHandler, extraEnv ...string) (*agentProc, error) {
+	return startAgentIn(ctx, a, args, dir, nil, h, extraEnv...)
+}
+
+// startAgentIn is startAgent for a host session (sb nil) or a sandboxed one:
+// then the agent is started through `vmexec confine` in the workdir, with the
+// descriptor's environment, and is not offered the client terminals (the
+// adapter would run their commands on the host; the agent uses its own tools,
+// which are confined and routed).
+func startAgentIn(ctx context.Context, a AgentConfig, args []string, dir string, sb *sandboxLaunch, h rpcHandler, extraEnv ...string) (*agentProc, error) {
 	path, err := exec.LookPath(a.Command)
 	if err != nil {
 		return nil, fmt.Errorf("command %q not found: %w", a.Command, err)
 	}
-	cmd := exec.Command(path, args...)
-	cmd.Dir = dir
-	cmd.Env = a.environ(extraEnv...)
+	var cmd *exec.Cmd
+	if sb != nil {
+		cmd = sb.command(path, args)
+		cmd.Env = append(a.environ(extraEnv...), sb.env...)
+	} else {
+		cmd = exec.Command(path, args...)
+		cmd.Dir = dir
+		cmd.Env = a.environ(extraEnv...)
+	}
 	ownProcessGroup(cmd)
 	// Plain os.Pipes (not cmd.*Pipe) so cmd.Wait never closes the read end
 	// before the connection drained it.
@@ -86,17 +101,17 @@ func startAgent(ctx context.Context, a AgentConfig, args []string, dir string, h
 		_ = cmd.Wait()
 		close(p.exited)
 	}()
-	if err := p.handshake(ctx, a); err != nil {
+	if err := p.handshake(ctx, a, sb == nil); err != nil {
 		p.stop()
 		return nil, p.diagnose(err)
 	}
 	return p, nil
 }
 
-func (p *agentProc) handshake(ctx context.Context, a AgentConfig) error {
+func (p *agentProc) handshake(ctx context.Context, a AgentConfig, terminal bool) error {
 	req := acpInitializeRequest{
 		ProtocolVersion:    acpProtocolVersion,
-		ClientCapabilities: acpClientCapabilities{FS: acpFSCapabilities{ReadTextFile: true, WriteTextFile: true}, Terminal: true},
+		ClientCapabilities: acpClientCapabilities{FS: acpFSCapabilities{ReadTextFile: true, WriteTextFile: true}, Terminal: terminal},
 		ClientInfo:         acpImplementation{Name: "bnbloc-acp", Version: adapterVersion},
 	}
 	if err := p.call(ctx, methodInitialize, req, &p.init); err != nil {

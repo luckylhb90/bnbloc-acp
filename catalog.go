@@ -42,6 +42,10 @@ type agentStatus struct {
 	// (stdio always; http / sse per its initialize mcpCapabilities).
 	MCPTransports []string `json:"mcpTransports,omitempty"`
 	CheckedAtMs   int64    `json:"checkedAtMs,omitempty"`
+	// Sandbox is the routing that lets the agent run in the agent sandbox
+	// ("" = it cannot); SandboxNote says why not (sandbox.go).
+	Sandbox     string `json:"sandbox,omitempty"`
+	SandboxNote string `json:"sandboxNote,omitempty"`
 }
 
 // mcpTransports reads an agent's MCP transports from its initialize answer.
@@ -266,6 +270,7 @@ func (r *registry) statuses() []agentStatus {
 		if !ok {
 			st = agentStatus{Name: a.Name, Reason: "not checked yet"}
 		}
+		st.Sandbox, st.SandboxNote = a.sandboxStatus()
 		out = append(out, st)
 	}
 	return out

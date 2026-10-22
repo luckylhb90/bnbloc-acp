@@ -51,6 +51,7 @@ Each agent uses its own sign-in (log in to Claude Code, Codex, … as usual).
 | `mcpServers` | MCP servers passed to every session. |
 | `profile` | How a session's expert profile maps onto this agent (below). |
 | `stderrActivity` | Log lines that mark a step of the running turn (below). |
+| `sandbox` | The routing that lets the agent run in the agent sandbox (`"opencode"`); empty = it cannot (below). |
 | `models`, `modelArgs` | A model catalog and the spawn args applying it, only for an agent that reports no model selector. |
 | `permissions.allow` | Tool kinds the adapter approves (below). |
 | `idleTimeout` | Stop an idle session's process after this long (it resumes on the next message). |
@@ -207,11 +208,41 @@ The adapter answers the agent's requests:
 
 The policy covers what the agent asks the client for. An agent acting through
 its own built-in tools follows its own approval settings: tighten those with
-the agent's `env`, `args` or `mode`. For the same reason `bnbloc-acp` does not
-advertise bnbloc's microVM `sandboxExec`: its agents run on the host. A
-teammate borrowing your ACP agent therefore runs on your machine under this
-policy, unless the organization requires the sandbox for borrowed runs
-(then such borrows are refused).
+the agent's `env`, `args` or `mode`. That is the policy of a session that runs
+on the host. A session can instead run in bnbloc's agent sandbox, below.
+
+## The agent sandbox
+
+With bnbloc's agent sandbox on (a member's mode `all`, or a borrowed run under
+the organization's policy) the bridge asks the core to run a session sandboxed,
+and the core does it for an agent whose CLI has a **routing** it implements,
+named by the agent's `sandbox` setting. One exists: `"opencode"`.
+
+```json
+{ "name": "opencode", "command": "opencode", "args": ["acp"], "sandbox": "opencode" }
+```
+
+A sandboxed session runs the agent through `bnbloc-vmexec confine`: the OS
+sandbox covers the agent **and everything it spawns**, so it writes only its
+workspace and cannot read the adapter's home (the agents' config, every other
+workspace). The agent's shell commands are routed into the room's sandbox space
+(for opencode, by a plugin the core loads through `OPENCODE_CONFIG_DIR`, which
+the agent cannot edit). The exec token lives in a file the core renews at every
+input, never in the agent's environment. The ACP `terminal` client capability is
+not offered to a sandboxed agent (its commands would run on the host). Such a
+session's workspace is a directory the bridge made; deleting the workspace
+removes nothing in it.
+
+An agent **without** a `sandbox` setting cannot run sandboxed: a sandboxed
+request for it is refused (`bad_request`, naming the agent), never run on the
+host. `bnbloc-acp check` shows which agents can. The first sandboxed session of
+an opencode version prepares the routing's config directory (seconds to a
+minute); a request that times out meanwhile leaves the preparation running and
+the retry finds it done.
+
+Limit: the routing hooks opencode's bash tool. Another way to a shell (a
+subagent, an MCP server that runs commands) is confined but runs on the host
+inside the confinement, not in the VM.
 
 ## Install into bnbloc
 

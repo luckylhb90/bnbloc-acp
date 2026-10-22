@@ -59,11 +59,29 @@ func (s *session) startFresh() (*agentProc, error) {
 	}
 	s.mu.Lock()
 	proc := s.proc
+	changed := s.sandboxed && s.procPin != execPin(s.exe)
 	s.mu.Unlock()
+	if proc != nil && proc.alive() && changed {
+		// A fresh conversation under a changed sandbox descriptor runs in a
+		// new process: the running one was started with the old scope.
+		s.mu.Lock()
+		if s.proc == proc {
+			s.proc = nil
+			s.killTerminalsLocked()
+		}
+		s.mu.Unlock()
+		proc.stop()
+		proc = nil
+	}
 	started := false
+	pin := ""
 	if proc == nil || !proc.alive() {
-		var err error
-		if proc, err = startAgent(ctx, s.agent, s.agent.spawnArgs(s.spawnModel), s.ws.dir, s, profileEnviron(s.profile, pc)...); err != nil {
+		launch, p, err := s.launch(s.ctx)
+		if err != nil {
+			return nil, err
+		}
+		pin = p
+		if proc, err = startAgentIn(ctx, s.agent, s.agent.spawnArgs(s.spawnModel), s.ws.dir, launch, s, profileEnviron(s.profile, pc)...); err != nil {
 			return nil, err
 		}
 		started = true
@@ -78,6 +96,9 @@ func (s *session) startFresh() (*agentProc, error) {
 			s.mu.Lock()
 			old := s.acpID
 			s.proc, s.acpID, s.fresh = proc, resp.SessionID, false
+			if started {
+				s.procPin = pin
+			}
 			s.mcpTold = "" // a new conversation: tell it of missing tools again
 			s.resumable, s.loadable = proc.init.canResume(), proc.init.AgentCapabilities.LoadSession
 			if len(resp.ConfigOptions) > 0 {

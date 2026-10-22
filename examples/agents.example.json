@@ -28,6 +28,7 @@
       "command": "opencode",
       "args": ["acp", "--print-logs", "--log-level", "WARN"],
       "permissions": { "allow": ["read", "search", "think", "edit", "delete", "move", "execute"] },
+      "sandbox": "opencode",
       "profile": { "instructionsVia": "file:AGENTS.md", "skillsDir": ".opencode/skills", "mcp": true },
       "stderrActivity": [
         { "match": "message=\"stream error\".*(?i)(rate limit|too many requests|: 429\\))",

@@ -300,10 +300,21 @@ func TestWorkspaceWritesWidenToAgentConfigPaths(t *testing.T) {
 			t.Fatalf("write %s: %v", p, err)
 		}
 	}
-	var perr *protocol.ProtocolError
+	// The client refuses a path outside the contract before any I/O; the core
+	// refuses it too when a caller skips that guard (a raw request).
 	for _, p := range []string{"README.md", "sub/AGENTS.md", ".claude/settings.json", ".agents/other/x"} {
-		if err := h.client.WriteWorkspaceFile(h.ctx(), h.ep, ws, p, "x"); !errors.As(err, &perr) || perr.Code != protocol.ErrorBadRequest {
+		if err := h.client.WriteWorkspaceFile(h.ctx(), h.ep, ws, p, "x"); !errors.Is(err, core.ErrWorkspacePathNotAllowed) {
 			t.Fatalf("write %s = %v", p, err)
+		}
+		req, _ := http.NewRequest(http.MethodPut, h.ep.BaseURL+"/core/v1/workspaces/"+ws+"/files/"+p, strings.NewReader(`{"content":"x"}`))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("raw write %s = %d, want 400", p, resp.StatusCode)
 		}
 	}
 	sid := h.session(ws, "fake", "write "+filepath.Join(root.dir, "AGENTS.md")+" HIJACK", core.SessionOptions{})

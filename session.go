@@ -28,6 +28,11 @@ const maxReadTextBytes = 16 << 20
 // neither resume nor load sessions, so the conversation cannot continue.
 var errSessionLost = errors.New("the agent process exited and the agent cannot resume sessions")
 
+// errSandboxChanged: a sandboxed input changed what the agent process was started
+// with and the agent cannot resume or load sessions, so it cannot be continued
+// in a new process under the new descriptor.
+var errSandboxChanged = fmt.Errorf("%w: the sandbox changed and the agent cannot continue its session in a new process", errSandboxRefused)
+
 // errSessionOption: the agent refused the configured mode or the sender's
 // model / reasoning choice (a bad request, not an unavailable core).
 var errSessionOption = errors.New("session option rejected")
@@ -105,6 +110,15 @@ type session struct {
 	mcpTold  string
 
 	terminals map[string]*terminal
+
+	// Sandbox (sandbox.go): sandboxed marks a session that runs its agent
+	// confined, for good (a sandboxed session never runs on the host); exe is
+	// the latest descriptor an input carried (its token is also in the token
+	// file); procPin is the pin the running process was started with.
+	sandboxed bool
+	exe       core.SandboxExecution
+	procPin   string
+	sbHost    sandboxHost
 }
 
 type costState struct {
@@ -131,7 +145,11 @@ func (s *session) open(ctx context.Context, first turnInput) error {
 	if err := materializeProfile(s.profile, s.ws, pc); err != nil {
 		return fmt.Errorf("profile: %w", err)
 	}
-	proc, err := startAgent(hctx, s.agent, s.agent.spawnArgs(s.spawnModel), s.ws.dir, s, profileEnviron(s.profile, pc)...)
+	launch, pin, err := s.launch(ctx)
+	if err != nil {
+		return err
+	}
+	proc, err := startAgentIn(hctx, s.agent, s.agent.spawnArgs(s.spawnModel), s.ws.dir, launch, s, profileEnviron(s.profile, pc)...)
 	if err != nil {
 		return err
 	}
@@ -151,7 +169,7 @@ func (s *session) open(ctx context.Context, first turnInput) error {
 		return errors.New("session/new returned no session id")
 	}
 	s.mu.Lock()
-	s.proc, s.acpID = proc, resp.SessionID
+	s.proc, s.acpID, s.procPin = proc, resp.SessionID, pin
 	s.resumable, s.loadable = proc.init.canResume(), proc.init.AgentCapabilities.LoadSession
 	s.options = resp.ConfigOptions
 	s.mu.Unlock()
@@ -450,6 +468,7 @@ func (s *session) ensureProc() (*agentProc, error) {
 	s.mu.Lock()
 	proc := s.proc
 	resumable, loadable, closed, fresh := s.resumable, s.loadable, s.closed, s.fresh
+	changed := s.sandboxed && s.procPin != execPin(s.exe)
 	s.mu.Unlock()
 	if closed {
 		return nil, errSessionLost
@@ -458,8 +477,24 @@ func (s *session) ensureProc() (*agentProc, error) {
 		return s.startFresh()
 	}
 	if proc != nil && proc.alive() {
-		return proc, nil
+		if !changed {
+			return proc, nil
+		}
+		// The descriptor this turn carries is not the one the process was
+		// started with: the session continues in a new process under it.
+		if !resumable && !loadable {
+			return nil, errSandboxChanged
+		}
+		s.mu.Lock()
+		if s.proc == proc {
+			s.proc = nil
+			s.killTerminalsLocked()
+		}
+		s.mu.Unlock()
+		proc.stop()
+		proc = nil
 	}
+
 	if !resumable && !loadable {
 		s.markLost()
 		return nil, errSessionLost
@@ -474,7 +509,13 @@ func (s *session) ensureProc() (*agentProc, error) {
 		s.markLost()
 		return nil, fmt.Errorf("profile: %w", err)
 	}
-	proc, err := startAgent(ctx, s.agent, s.agent.spawnArgs(s.spawnModel), s.ws.dir, s, profileEnviron(s.profile, pc)...)
+	// Setting up a sandbox launch (the first one of an opencode version warms
+	// its config directory) is not bound by the handshake timeout.
+	launch, pin, err := s.launch(s.ctx)
+	if err != nil {
+		return nil, err
+	}
+	proc, err = startAgentIn(ctx, s.agent, s.agent.spawnArgs(s.spawnModel), s.ws.dir, launch, s, profileEnviron(s.profile, pc)...)
 	if err != nil {
 		s.markLost()
 		return nil, err
@@ -500,7 +541,7 @@ func (s *session) ensureProc() (*agentProc, error) {
 		return nil, fmt.Errorf("continue session: %w", err)
 	}
 	s.mu.Lock()
-	s.proc = proc
+	s.proc, s.procPin = proc, pin
 	if len(resp.ConfigOptions) > 0 {
 		s.options = resp.ConfigOptions
 	}
@@ -585,6 +626,40 @@ func (s *session) close() {
 	if proc != nil {
 		proc.stop()
 	}
+	if s.sandboxed {
+		s.sbHost.removeToken(s.id)
+	}
+}
+
+// launch is how this session's agent process is started: confined for a
+// sandboxed session (its pin returned too), nil for a host session. It writes
+// the current exec token where vmexec reads it.
+func (s *session) launch(ctx context.Context) (*sandboxLaunch, string, error) {
+	s.mu.Lock()
+	sandboxed, exe := s.sandboxed, s.exe
+	s.mu.Unlock()
+	if !sandboxed {
+		return nil, "", nil
+	}
+	l, err := s.sbHost.prepareLaunch(ctx, s.agent, exe, s.id)
+	if err != nil {
+		return nil, "", err
+	}
+	return l, execPin(exe), nil
+}
+
+// setExecution takes the descriptor an input carried: the session is sandboxed
+// from now on and the token file holds the new token at once (a running turn
+// benefits as much as the next one). What a process was started with changes
+// only at the next turn's start (ensureProc).
+func (s *session) setExecution(exe core.SandboxExecution) error {
+	if _, err := s.sbHost.writeToken(s.id, exe.ExecToken); err != nil {
+		return fmt.Errorf("the exec token file: %w", err)
+	}
+	s.mu.Lock()
+	s.sandboxed, s.exe = true, exe
+	s.mu.Unlock()
+	return nil
 }
 
 // idle: no turn running and none queued.

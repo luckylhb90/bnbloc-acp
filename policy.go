@@ -105,6 +105,12 @@ type workspaceRoot struct {
 	// workspaces root ("" = beside dir, as for an owned workspace).
 	workdirBacked bool
 	recordBase    string
+	// confined: the session runs in the agent sandbox. What the OS sandbox keeps
+	// the agent from writing, the adapter (which is not in it) must not write for
+	// it: the project config a harness executes on the host, and the bridge's
+	// denyWrite list (denyWrite).
+	confined  bool
+	denyWrite []string
 }
 
 func newWorkspaceRoot(dir string) (workspaceRoot, error) {
@@ -178,7 +184,54 @@ func (w workspaceRoot) resolveWritable(path string) (string, error) {
 	if rel, err := filepath.Rel(w.real, real); err == nil && core.BnblocOwnedPath(filepath.ToSlash(rel)) {
 		return "", errors.New("the agent configuration files are read-only")
 	}
+	if w.confined {
+		if rel, err := filepath.Rel(w.real, real); err == nil && core.ProtectedWorkspacePath(filepath.ToSlash(rel)) {
+			return "", errors.New("the project config a harness runs on the host is read-only in a sandboxed session")
+		}
+		for _, d := range w.denyWrite {
+			if w.underDenied(d, real) {
+				return "", errors.New("that path is write-protected in a sandboxed session")
+			}
+		}
+	}
 	return real, nil
+}
+
+// underDenied reports whether real is (or lies under) one of the bridge's
+// denyWrite entries; a trailing "/" names a directory. An entry is read as given
+// and, when it lies in the workspace, as its resolved form too.
+func (w workspaceRoot) underDenied(entry, real string) bool {
+	entry = strings.TrimSuffix(entry, "/")
+	if entry == "" {
+		return false
+	}
+	// As given, and with its symlinks resolved as far as it exists (a temp dir on
+	// macOS is reached through /var -> /private/var), since real is resolved.
+	candidates := []string{filepath.Clean(entry), resolveLoose(entry)}
+	if rel, err := filepath.Rel(w.dir, entry); err == nil && !strings.HasPrefix(rel, "..") {
+		candidates = append(candidates, filepath.Join(w.real, rel))
+	}
+	for _, c := range candidates {
+		if within(c, real) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveLoose is path with its symlinks resolved as far as it exists: the
+// deepest existing ancestor is resolved and the rest is appended (a path that
+// does not exist yet is still protected before it is made).
+func resolveLoose(path string) string {
+	path = filepath.Clean(path)
+	rest := ""
+	for p := path; p != "/" && p != "."; p = filepath.Dir(p) {
+		if resolved, err := filepath.EvalSymlinks(p); err == nil {
+			return filepath.Join(resolved, rest)
+		}
+		rest = filepath.Join(filepath.Base(p), rest)
+	}
+	return path
 }
 
 func within(root, path string) bool {

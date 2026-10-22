@@ -626,7 +626,7 @@ func (s *session) close() {
 	if proc != nil {
 		proc.stop()
 	}
-	if s.sandboxed {
+	if s.isSandboxed() {
 		s.sbHost.removeToken(s.id)
 	}
 }
@@ -653,17 +653,32 @@ func (s *session) launch(ctx context.Context) (*sandboxLaunch, string, error) {
 // benefits as much as the next one). What a process was started with changes
 // only at the next turn's start (ensureProc).
 func (s *session) setExecution(exe core.SandboxExecution) error {
+	s.mu.Lock()
+	if s.closed {
+		// A session closed meanwhile (its workspace deleted) must not get its
+		// token file made again.
+		s.mu.Unlock()
+		return errSessionLost
+	}
 	if _, err := s.sbHost.writeToken(s.id, exe.ExecToken); err != nil {
+		s.mu.Unlock()
 		return fmt.Errorf("the exec token file: %w", err)
 	}
-	s.mu.Lock()
 	if !s.sandboxed {
-		// Once, before any turn: a running turn reads the policy without the lock.
+		// Once, before any turn: a running turn reads these without the lock.
 		s.pol = policyFor(s.agent.Permissions, true)
+		s.ws.confined, s.ws.denyWrite = true, append([]string(nil), exe.HostConfine.DenyWrite...)
 	}
 	s.sandboxed, s.exe = true, exe
 	s.mu.Unlock()
 	return nil
+}
+
+// isSandboxed reports whether the session runs in the agent sandbox.
+func (s *session) isSandboxed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sandboxed
 }
 
 // idle: no turn running and none queued.
@@ -871,12 +886,23 @@ func (s *session) Request(ctx context.Context, method string, params json.RawMes
 		}
 		return s.writeTextFile(req)
 	case methodTerminalCreate:
+		if s.isSandboxed() {
+			// The adapter is not in the sandbox: a command it ran for the agent would
+			// run on the host, unconfined and unrouted. The agent runs commands with
+			// its own tools, which the confinement covers and the routing sends to the
+			// space (the terminal capability is not offered; a rogue agent asks anyway).
+			s.noteRefusal("running " + "a command through the adapter")
+			return nil, denied("running commands through the adapter in a sandboxed session")
+		}
 		var req acpCreateTerminalRequest
 		if err := json.Unmarshal(params, &req); err != nil {
 			return nil, invalidParams(err)
 		}
 		return s.createTerminal(req)
 	case methodTerminalOutput, methodTerminalWaitExit, methodTerminalKill, methodTerminalRelease:
+		if s.isSandboxed() {
+			return nil, denied("terminals in a sandboxed session")
+		}
 		var req acpTerminalRequest
 		if err := json.Unmarshal(params, &req); err != nil {
 			return nil, invalidParams(err)

@@ -47,23 +47,50 @@ func validSandboxRouting(s string) bool {
 	return s == "" || s == sandboxRoutingOpencode || s == sandboxRoutingClaude || s == sandboxOff
 }
 
-// detectRouting is the routing an agent's command names: the executable's name
-// and the packages an npx-style launcher is given, the way vmexec derives a
-// harness from the executable. note says why there is none ("" routing).
+// detectRouting is the routing an agent's command names, the way vmexec derives
+// a harness from the executable: the command's own name, or, when the command is
+// a package launcher (npx and kin), the package it is given. An argument of any
+// other command names nothing (`gemini --config /x/opencode` is not opencode).
+// note says why there is none ("" routing).
 func detectRouting(a AgentConfig) (routing, note string) {
-	words := append([]string{a.Command}, a.Args...)
-	for _, w := range words {
-		base := strings.ToLower(filepath.Base(w))
-		switch {
-		case base == "opencode":
-			return sandboxRoutingOpencode, ""
-		case strings.Contains(base, "claude-agent-acp") || strings.Contains(base, "claude-code-acp"):
-			return sandboxRoutingClaude, ""
-		case strings.Contains(base, "codex-acp"):
-			return "", "its routing (an exec server in the sandbox space) is not implemented in this core yet"
+	if r, n := routingOfName(filepath.Base(a.Command)); r != "" || n != "" {
+		return r, n
+	}
+	if launchers[strings.ToLower(strings.TrimSuffix(filepath.Base(a.Command), ".cmd"))] {
+		for _, w := range a.Args {
+			if strings.HasPrefix(w, "-") {
+				continue
+			}
+			if r, n := routingOfName(stripVersion(w)); r != "" || n != "" {
+				return r, n
+			}
 		}
 	}
 	return "", "no sandbox routing is known for this command; if it is opencode or Claude Code, set its `sandbox` to opencode or claude"
+}
+
+// launchers run a package by name.
+var launchers = map[string]bool{"npx": true, "pnpx": true, "bunx": true, "npm": true, "pnpm": true, "yarn": true, "bun": true}
+
+// stripVersion is a package name without its @version suffix.
+func stripVersion(pkg string) string {
+	if i := strings.LastIndex(pkg, "@"); i > 0 {
+		return pkg[:i]
+	}
+	return pkg
+}
+
+// routingOfName is the routing of an executable or package name.
+func routingOfName(name string) (routing, note string) {
+	switch strings.ToLower(name) {
+	case "opencode", "opencode-ai":
+		return sandboxRoutingOpencode, ""
+	case "claude-agent-acp", "claude-code-acp", "@agentclientprotocol/claude-agent-acp", "@zed-industries/claude-code-acp":
+		return sandboxRoutingClaude, ""
+	case "codex-acp", "@agentclientprotocol/codex-acp", "@zed-industries/codex-acp":
+		return "", "its routing (an exec server in the sandbox space) is not implemented in this core yet"
+	}
+	return "", ""
 }
 
 // sandboxRouting is the agent's routing: its `sandbox` setting, or the one its
@@ -200,6 +227,7 @@ func execPin(s core.SandboxExecution) string {
 
 // sandboxLaunch is how one agent process is started confined.
 type sandboxLaunch struct {
+	home   string // the adapter's home, read-denied to everything confined
 	vmexec string
 	flags  []string // vmexec confine flags
 	env    []string // the descriptor's and the routing's environment, PWD
@@ -237,6 +265,10 @@ func (h sandboxHost) writeToken(sessionID, token string) (string, error) {
 
 func (h sandboxHost) removeToken(sessionID string) { _ = os.RemoveAll(h.tokenDir(sessionID)) }
 
+// sweep removes every session's token directory (at start: no session survives
+// the process, so what is there is a crash's leftover).
+func (h sandboxHost) sweep() { _ = os.RemoveAll(filepath.Join(h.stateDir, "sessions")) }
+
 // prepareLaunch builds the confined launch of an agent for the session's
 // current descriptor: the token file, the routing's config, the confine flags
 // and the environment. It fails — and the request is refused — when the
@@ -263,7 +295,7 @@ func (h sandboxHost) prepareLaunch(ctx context.Context, agent AgentConfig, s cor
 	env = append(env, protocol.EnvVMExecTokenFile+"="+tokenFile, "PWD="+s.Workdir)
 
 	routing, _ := agent.sandboxRouting()
-	l := &sandboxLaunch{vmexec: s.VMExec, dir: s.Workdir}
+	l := &sandboxLaunch{vmexec: s.VMExec, dir: s.Workdir, home: h.home}
 	for _, hn := range sandboxHarnesses(routing) {
 		l.flags = append(l.flags, "--harness", hn)
 	}
@@ -280,7 +312,11 @@ func (h sandboxHost) prepareLaunch(ctx context.Context, agent AgentConfig, s cor
 	// A launcher such as npx installs the agent's package into npm's cache, which
 	// the confinement keeps read-only: the confined agent gets a cache of its
 	// own, used by confined runs only (the adapter's own starts use npm's).
-	npmDir := filepath.Join(h.stateDir, "npm-"+agent.Name)
+	// One cache per sandbox space (a room's agent for one person): a package a
+	// prompt-injected agent plants there is run only by that space's later starts,
+	// never by another room's or another member's.
+	spaceSum := sha256.Sum256([]byte(s.Space))
+	npmDir := filepath.Join(h.stateDir, "npm-"+agent.Name+"-"+hex.EncodeToString(spaceSum[:4]))
 	if err := os.MkdirAll(npmDir, 0o700); err != nil {
 		return nil, fmt.Errorf("the agent's npm cache: %w", err)
 	}
@@ -442,9 +478,12 @@ func runOpencodeWarm(ctx context.Context, l *sandboxLaunch, env []string, dir, b
 	for _, hn := range sandboxHarnesses(sandboxRoutingOpencode) {
 		argv = append(argv, "--harness", hn)
 	}
-	argv = append(argv, "--allow-write", dir, "--", bin, "models")
+	// The warm-up runs a network install: it reads and writes its config directory
+	// and nothing else under the adapter's home.
+	argv = append(argv, "--deny-read", l.home, "--allow-read", dir, "--allow-write", dir, "--", bin, "models")
 	cmd := exec.Command(l.vmexec, argv...)
 	cmd.Dir = l.dir
+	cmd.WaitDelay = 5 * time.Second // a grandchild holding the pipes must not hold the wait
 	// The adapter's own environment (HOME, PATH: confine and npm need them),
 	// minus its settings, then the descriptor's and the routing's.
 	cmd.Env = append(append(adapterEnviron(), env...), "OPENCODE_CONFIG_DIR="+dir, "npm_config_cache="+filepath.Join(dir, ".npm-cache"))

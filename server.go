@@ -263,6 +263,8 @@ func (a *adapter) createSession(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.open(r.Context(), turnInput{text: req.Prompt, opts: req.Options, deadline: deadlineOf(req.DeadlineMs)}); err != nil {
 		slog.Warn("bnbloc-acp session start failed", "agent", agent.Name, "error", err)
+		// A session that never started leaves no token behind.
+		s.close()
 		if errors.Is(err, errSessionOption) || errors.Is(err, errMcpClash) || errors.Is(err, errBadPath) || errors.Is(err, errOutsideWorkspace) || errors.Is(err, errSandboxRefused) {
 			writeErr(w, errf(http.StatusBadRequest, protocol.ErrorBadRequest, agent.Name+": "+err.Error()))
 			return

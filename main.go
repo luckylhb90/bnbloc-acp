@@ -66,6 +66,11 @@ func parseOptions(name string, args []string) (options, error) {
 		}
 		o.home = filepath.Join(dir, "bnbloc-acp")
 	}
+	// Absolute: a sandboxed agent is started with paths under it (the confine
+	// helper refuses a relative one).
+	if abs, err := filepath.Abs(o.home); err == nil {
+		o.home = abs
+	}
 	if o.config == "" {
 		o.config = filepath.Join(o.home, "agents.json")
 	}
@@ -123,6 +128,9 @@ func serve(o options) error {
 		return err
 	}
 	a := newAdapter(o.name, token, ws, reg)
+	// Sessions live in memory: none outlives the process, so a token file found
+	// now belongs to a session that is gone.
+	a.sandbox.sweep()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

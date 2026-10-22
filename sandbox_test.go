@@ -743,3 +743,128 @@ func TestSandboxedSessionApprovesCommandsByDefault(t *testing.T) {
 		t.Errorf("an operator's own list was overridden: %s", got)
 	}
 }
+
+// The adapter is not in the sandbox, so it must not do for a confined agent what
+// the OS sandbox forbids the agent: a rogue agent asks for a terminal and for a
+// write whether or not it was offered them.
+func TestSandboxedSessionIsRefusedWhatTheOSSandboxWouldRefuse(t *testing.T) {
+	h := sandboxHarness(t, nil)
+	vmexec, _ := fakeVMExec(t)
+	dir := t.TempDir()
+	ws := h.workdirWorkspace(dir)
+	exe := sbExecution(dir, vmexec, "t", "sp")
+	exe.Sandbox.HostConfine.DenyWrite = append(exe.Sandbox.HostConfine.DenyWrite, filepath.Join(dir, ".routing")+"/")
+	sid := h.sandboxSession(ws, exe)
+	h.readInfo(ws, sid)
+	ask := func(prompt string) string {
+		t.Helper()
+		h.sendSandboxed(ws, sid, prompt, exe)
+		h.settle(ws, sid)
+		return h.lastText(ws, sid)
+	}
+	marker := filepath.Join(t.TempDir(), "ran-on-the-host")
+	// The create itself is refused (the fake agent reports a failed create as
+	// "terminal=<error>"; a served one goes on to "exit=...").
+	if got := ask("terminal touch " + marker); !strings.HasPrefix(got, "terminal=") || !strings.Contains(got, "sandboxed session") {
+		t.Errorf("a terminal was created in a sandboxed session: %s", got)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("a command ran on the host through the adapter's terminal")
+	}
+	for _, rel := range []string{".claude/settings.json", "opencode.json", ".codex/config.toml", "CLAUDE.local.md", ".routing/x.txt"} {
+		got := ask("write " + filepath.Join(dir, rel) + " planted")
+		if strings.Contains(got, `"result"`) || !strings.Contains(got, "write=") || !strings.Contains(got, "error") {
+			t.Errorf("a write to %s was not refused: %s", rel, got)
+		}
+		if _, err := os.Stat(filepath.Join(dir, rel)); err == nil {
+			t.Errorf("%s was written through the adapter", rel)
+		}
+	}
+	if got := ask("write " + filepath.Join(dir, "out", "report.md") + " fine"); strings.Contains(got, `"error"`) {
+		t.Errorf("an ordinary write was refused: %s", got)
+	}
+	if raw, err := os.ReadFile(filepath.Join(dir, "out", "report.md")); err != nil || string(raw) != "fine" {
+		t.Errorf("the ordinary write did not land: %q %v", raw, err)
+	}
+}
+
+// A session that never started leaves no exec token behind, and a restart sweeps
+// what a crash left.
+func TestExecTokensDoNotOutliveTheirSession(t *testing.T) {
+	h := sandboxHarness(t, nil)
+	warmOpencodeFn = func(context.Context, *sandboxLaunch, []string, string) error { return refuse("opencode was not found") }
+	vmexec, _ := fakeVMExec(t)
+	dir := t.TempDir()
+	ws := h.workdirWorkspace(dir)
+	if _, err := h.client.CreateSession(h.ctx(), h.ep, core.SessionRequest{WorkspaceID: ws, TargetID: "fake", Prompt: "hi",
+		Options: core.SessionOptions{Execution: sbExecution(dir, vmexec, "secret-token", "sp")}}); err == nil {
+		t.Fatal("the create did not fail")
+	}
+	left, _ := os.ReadDir(filepath.Join(h.a.sandbox.stateDir, "sessions"))
+	if len(left) != 0 {
+		t.Fatalf("a failed create left its token: %v", left)
+	}
+	// A crash's leftover is swept at start.
+	stale := filepath.Join(h.a.sandbox.stateDir, "sessions", "s-crashed")
+	if err := os.MkdirAll(stale, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(stale, "token"), []byte("old"), 0o600)
+	h.a.sandbox.sweep()
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("the sweep left %s: %v", stale, err)
+	}
+}
+
+// A package of one space is not another's: one npm cache per sandbox space.
+func TestNpmCacheIsPerSpace(t *testing.T) {
+	needSandboxHere(t)
+	a := fakeAgentConfig(t, "fake", nil)
+	a.Sandbox = sandboxRoutingClaude
+	h := newHarness(t, Config{Agents: []AgentConfig{a}})
+	vmexec, _ := fakeVMExec(t)
+	cache := func(space string) string {
+		dir := t.TempDir()
+		ws := h.workdirWorkspace(dir)
+		sid := h.sandboxSession(ws, sbExecution(dir, vmexec, "t", space))
+		return h.readInfo(ws, sid).NPMCache
+	}
+	one, two, again := cache("space-one"), cache("space-two"), cache("space-one")
+	if one == two || one != again {
+		t.Fatalf("npm caches: %q %q %q; want one per space, stable for the same space", one, two, again)
+	}
+}
+
+// An argument is not a command: only the executable, or the package a launcher
+// is given, names a routing.
+func TestRoutingIsNotGuessedFromUnrelatedArguments(t *testing.T) {
+	for _, a := range []AgentConfig{
+		{Command: "gemini", Args: []string{"--config", "/x/opencode"}},
+		{Command: "my-agent", Args: []string{"@agentclientprotocol/claude-agent-acp"}},
+		{Command: "node", Args: []string{"/x/claude-agent-acp"}},
+	} {
+		if routing, _ := a.sandboxRouting(); routing != "" {
+			t.Errorf("%s %v was given the %s routing and would run confined but unrouted", a.Command, a.Args, routing)
+		}
+	}
+	for _, a := range []AgentConfig{
+		{Command: "npx", Args: []string{"-y", "@agentclientprotocol/claude-agent-acp@1.2.3"}},
+		{Command: "/opt/bin/pnpx", Args: []string{"opencode-ai", "acp"}},
+	} {
+		if routing, _ := a.sandboxRouting(); routing == "" {
+			t.Errorf("%s %v was not recognised", a.Command, a.Args)
+		}
+	}
+}
+
+// A relative --home would make every sandboxed start fail (the helper refuses a
+// relative path), so it is made absolute.
+func TestHomeIsAbsolute(t *testing.T) {
+	o, err := parseOptions("serve", []string{"--home", "rel/home"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(o.home) {
+		t.Fatalf("home = %q", o.home)
+	}
+}

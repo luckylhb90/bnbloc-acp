@@ -261,6 +261,9 @@ func TestSandboxedSessionStartsConfinedWithTheDescriptor(t *testing.T) {
 	if cwd, _ := filepath.EvalSymlinks(in.Cwd); cwd != real || in.Pwd != dir && in.Pwd != real {
 		t.Fatalf("cwd=%q pwd=%q, want the workdir %q", in.Cwd, in.Pwd, dir)
 	}
+	if raw, _ := os.ReadFile(logPath); !strings.Contains("\n"+string(raw), "\n--deny-read\n/h/.config/acme/mail\n") {
+		t.Fatalf("the descriptor's denyRead did not reach confine as a flag: %q", raw)
+	}
 	if in.Space != "space-a" || in.DenyRead != `["/h/.config/acme/mail"]` {
 		t.Fatalf("descriptor in the environment: space=%q denyRead=%q", in.Space, in.DenyRead)
 	}

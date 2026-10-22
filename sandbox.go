@@ -271,6 +271,11 @@ func (h sandboxHost) prepareLaunch(ctx context.Context, agent AgentConfig, s cor
 	// other workspace: a confined agent reads none of it. Its own token
 	// directory is re-allowed (a sub-path allow wins over the ancestor's deny).
 	l.flags = append(l.flags, "--deny-read", h.home, "--allow-read", tokenDir, "--deny-write", tokenDir)
+	// The descriptor's denyRead also goes as flags, not only through the
+	// environment variable: the vmexec a sandbox package ships may predate it.
+	for _, p := range hc.DenyRead {
+		l.flags = append(l.flags, "--deny-read", p)
+	}
 
 	// A launcher such as npx installs the agent's package into npm's cache, which
 	// the confinement keeps read-only: the confined agent gets a cache of its

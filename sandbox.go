@@ -31,11 +31,52 @@ import (
 	"github.com/luckylhb90/bnbloc/core/protocol"
 )
 
-// sandboxRoutingOpencode is the one routing implemented: opencode's plugin hook.
-const sandboxRoutingOpencode = "opencode"
+// The routings implemented: how an agent's CLI hands its shell commands to the
+// sandbox. opencode: a tool.execute.before plugin. claude: Claude Code's
+// CLAUDE_CODE_SHELL_PREFIX router. sandboxOff turns the sandbox off for one
+// agent (a request for it is refused).
+const (
+	sandboxRoutingOpencode = "opencode"
+	sandboxRoutingClaude   = "claude"
+	sandboxOff             = "off"
+)
 
-// validSandboxRouting reports a value of an agent's `sandbox` setting.
-func validSandboxRouting(s string) bool { return s == "" || s == sandboxRoutingOpencode }
+// validSandboxRouting reports a value of an agent's `sandbox` setting. It is
+// optional: an agent is recognised by its command (detectRouting).
+func validSandboxRouting(s string) bool {
+	return s == "" || s == sandboxRoutingOpencode || s == sandboxRoutingClaude || s == sandboxOff
+}
+
+// detectRouting is the routing an agent's command names: the executable's name
+// and the packages an npx-style launcher is given, the way vmexec derives a
+// harness from the executable. note says why there is none ("" routing).
+func detectRouting(a AgentConfig) (routing, note string) {
+	words := append([]string{a.Command}, a.Args...)
+	for _, w := range words {
+		base := strings.ToLower(filepath.Base(w))
+		switch {
+		case base == "opencode":
+			return sandboxRoutingOpencode, ""
+		case strings.Contains(base, "claude-agent-acp") || strings.Contains(base, "claude-code-acp"):
+			return sandboxRoutingClaude, ""
+		case strings.Contains(base, "codex-acp"):
+			return "", "its routing (an exec server in the sandbox space) is not implemented in this core yet"
+		}
+	}
+	return "", "no sandbox routing is known for this command; if it is opencode or Claude Code, set its `sandbox` to opencode or claude"
+}
+
+// sandboxRouting is the agent's routing: its `sandbox` setting, or the one its
+// command names. note says why there is none.
+func (a AgentConfig) sandboxRouting() (routing, note string) {
+	switch a.Sandbox {
+	case "":
+		return detectRouting(a)
+	case sandboxOff:
+		return "", "its config sets `sandbox` to off"
+	}
+	return a.Sandbox, ""
+}
 
 // sandboxHere reports whether this machine can confine an agent process
 // (vmexec confine: Seatbelt on macOS, bubblewrap on Linux).
@@ -59,11 +100,11 @@ func serverCapabilities() []string {
 
 // sandboxUnsupported is why an agent cannot run sandboxed ("" = it can).
 func (a AgentConfig) sandboxUnsupported() string {
-	switch {
-	case !sandboxHere():
+	if !sandboxHere() {
 		return "the agent sandbox confines agents on macOS and Linux only"
-	case a.Sandbox == "":
-		return "its config has no `sandbox` routing for this agent's CLI (supported: " + sandboxRoutingOpencode + ")"
+	}
+	if routing, note := a.sandboxRouting(); routing == "" {
+		return note
 	}
 	return ""
 }
@@ -73,15 +114,18 @@ func (a AgentConfig) sandboxStatus() (routing, note string) {
 	if why := a.sandboxUnsupported(); why != "" {
 		return "", why
 	}
-	return a.Sandbox, ""
+	return a.sandboxRouting()
 }
 
 // harnesses are the vmexec confine profiles of a routing: the CLI's own, then
 // those whose state it reads and writes (opencode reads Claude Code's skills
 // and CLAUDE.md natively).
 func sandboxHarnesses(routing string) []string {
-	if routing == sandboxRoutingOpencode {
+	switch routing {
+	case sandboxRoutingOpencode:
 		return []string{"opencode", "claude"}
+	case sandboxRoutingClaude:
+		return []string{"claude"}
 	}
 	return []string{"generic"}
 }
@@ -218,8 +262,9 @@ func (h sandboxHost) prepareLaunch(ctx context.Context, agent AgentConfig, s cor
 	})
 	env = append(env, protocol.EnvVMExecTokenFile+"="+tokenFile, "PWD="+s.Workdir)
 
+	routing, _ := agent.sandboxRouting()
 	l := &sandboxLaunch{vmexec: s.VMExec, dir: s.Workdir}
-	for _, hn := range sandboxHarnesses(agent.Sandbox) {
+	for _, hn := range sandboxHarnesses(routing) {
 		l.flags = append(l.flags, "--harness", hn)
 	}
 	// The adapter's home holds the agents' config (it can carry keys) and every
@@ -227,7 +272,17 @@ func (h sandboxHost) prepareLaunch(ctx context.Context, agent AgentConfig, s cor
 	// directory is re-allowed (a sub-path allow wins over the ancestor's deny).
 	l.flags = append(l.flags, "--deny-read", h.home, "--allow-read", tokenDir, "--deny-write", tokenDir)
 
-	switch agent.Sandbox {
+	// A launcher such as npx installs the agent's package into npm's cache, which
+	// the confinement keeps read-only: the confined agent gets a cache of its
+	// own, used by confined runs only (the adapter's own starts use npm's).
+	npmDir := filepath.Join(h.stateDir, "npm-"+agent.Name)
+	if err := os.MkdirAll(npmDir, 0o700); err != nil {
+		return nil, fmt.Errorf("the agent's npm cache: %w", err)
+	}
+	env = append(env, "npm_config_cache="+npmDir)
+	l.flags = append(l.flags, "--allow-read", npmDir, "--allow-write", npmDir)
+
+	switch routing {
 	case sandboxRoutingOpencode:
 		cfgDir, err := h.prepareOpencode(ctx, l, env, s)
 		if err != nil {
@@ -235,6 +290,17 @@ func (h sandboxHost) prepareLaunch(ctx context.Context, agent AgentConfig, s cor
 		}
 		env = append(env, "OPENCODE_CONFIG_DIR="+cfgDir)
 		l.flags = append(l.flags, "--allow-read", cfgDir, "--deny-write", cfgDir)
+	case sandboxRoutingClaude:
+		// Claude Code quotes a shell prefix without a " -" as one word and routes
+		// only a prefix that is an absolute path, so the prefix is a link named
+		// for the router, in the token directory (readable, never writable by
+		// the agent), to vmexec.
+		link := filepath.Join(tokenDir, "bnbloc-vmexec-claude-prefix")
+		_ = os.Remove(link)
+		if err := os.Symlink(s.VMExec, link); err != nil {
+			return nil, fmt.Errorf("claude shell-prefix link: %w", err)
+		}
+		env = append(env, "CLAUDE_CODE_SHELL_PREFIX="+link)
 	}
 	l.env = env
 	return l, nil

@@ -97,6 +97,10 @@ type procInfo struct {
 	Space      string `json:"space"`
 	DenyRead   string `json:"denyRead"`
 	ACPEnvLeak bool   `json:"acpEnvLeak"`
+	// ClaudePrefix and NPMCache are the claude routing's prefix and the
+	// confined agent's own npm cache.
+	ClaudePrefix string `json:"claudePrefix"`
+	NPMCache     string `json:"npmCache"`
 }
 
 func (h *harness) info(ws, sid string) procInfo {
@@ -129,7 +133,7 @@ func TestSandboxConfigValidation(t *testing.T) {
 	for _, c := range []struct {
 		sandbox string
 		ok      bool
-	}{{"", true}, {"opencode", true}, {"claude", false}, {"OpenCode", false}} {
+	}{{"", true}, {"opencode", true}, {"claude", true}, {"off", true}, {"codex", false}, {"OpenCode", false}} {
 		_, err := ParseConfig([]byte(`{"agents":[{"name":"a","command":"x","sandbox":"` + c.sandbox + `"}]}`))
 		if (err == nil) != c.ok {
 			t.Errorf("sandbox %q: err = %v, want ok=%v", c.sandbox, err, c.ok)
@@ -514,16 +518,15 @@ func TestCheckAndStatusSaySandboxSupport(t *testing.T) {
 	}
 }
 
-// The real agent, the real helper, the real routing (run with
-// ACP_REAL_OPENCODE=1: it starts the installed opencode with its login and
-// makes small model calls). opencode starts confined with the routing plugin
-// loaded, answers a turn, and a command it is asked to run through its bash
-// tool does NOT run on the host: the plugin hands it to vmexec, which has no
-// sandbox service to run it in here, so it fails and leaves no marker.
-func TestRealOpencodeIsConfinedAndRouted(t *testing.T) {
-	if os.Getenv("ACP_REAL_OPENCODE") != "1" {
-		t.Skip("set ACP_REAL_OPENCODE=1 to run the installed opencode")
-	}
+// The real agent, the real helper, the real routing (opt in: they start the
+// installed agent with its login and make small model calls). The agent starts
+// confined with the routing loaded and answers a turn, and a command it is asked
+// to run through its bash tool does NOT run on the host: the routing hands it to
+// vmexec, which has no sandbox service to run it in here, so it fails and leaves
+// no marker. No `sandbox` setting is given: the routing is recognised from the
+// command.
+func realConfinedAndRouted(t *testing.T, agent AgentConfig, bashTool string) {
+	t.Helper()
 	if runtime.GOOS != "darwin" {
 		t.Skip("the real Seatbelt profile (macOS)")
 	}
@@ -537,11 +540,10 @@ func TestRealOpencodeIsConfinedAndRouted(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(acpHome) })
-	agent := AgentConfig{Name: "opencode", Command: "opencode", Args: []string{"acp"}, Sandbox: sandboxRoutingOpencode,
-		Permissions: Permissions{Allow: []string{"*"}}}
+	agent.Permissions = Permissions{Allow: []string{"*"}}
 	h := newHarnessAt(t, Config{Agents: []AgentConfig{agent}}, acpHome)
-	if st := h.a.reg.statuses(); len(st) != 1 || !st[0].Available {
-		t.Fatalf("opencode is not available through the adapter: %+v", st)
+	if st := h.a.reg.statuses(); len(st) != 1 || !st[0].Available || st[0].Sandbox == "" {
+		t.Fatalf("%s is not available (or not sandbox-capable) through the adapter: %+v", agent.Name, st)
 	}
 	dir := t.TempDir()
 	ws := h.workdirWorkspace(dir)
@@ -550,7 +552,7 @@ func TestRealOpencodeIsConfinedAndRouted(t *testing.T) {
 	exe.Sandbox.HostConfine.DenyRead, exe.Sandbox.HostConfine.DenyWrite = nil, nil
 
 	wait := func(sid string) core.TurnStatus {
-		deadline := time.Now().Add(4 * time.Minute)
+		deadline := time.Now().Add(6 * time.Minute)
 		for time.Now().Before(deadline) {
 			ts, err := h.client.PollTurn(context.Background(), h.ep, ws, sid)
 			if err != nil {
@@ -564,11 +566,18 @@ func TestRealOpencodeIsConfinedAndRouted(t *testing.T) {
 		t.Fatal("the turn never ended")
 		return core.TurnStatus{}
 	}
-	res, err := h.client.CreateSession(context.Background(), h.ep, core.SessionRequest{WorkspaceID: ws, TargetID: "opencode",
-		Prompt:  "Reply with exactly the word ok and nothing else. Do not use any tools.",
-		Options: core.SessionOptions{Execution: exe}})
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
+	var res core.SessionResult
+	for attempt := 0; ; attempt++ { // the first start may download the agent into its private cache
+		res, err = h.client.CreateSession(context.Background(), h.ep, core.SessionRequest{WorkspaceID: ws, TargetID: agent.Name,
+			Prompt:  "Reply with exactly the word ok and nothing else. Do not use any tools.",
+			Options: core.SessionOptions{Execution: exe}})
+		if err == nil {
+			break
+		}
+		if attempt >= 3 {
+			t.Fatalf("CreateSession: %v", err)
+		}
+		t.Logf("CreateSession attempt %d: %v", attempt+1, err)
 	}
 	if ts := wait(res.SessionID); ts.Failed {
 		t.Fatalf("the first turn failed: %+v", ts)
@@ -578,7 +587,7 @@ func TestRealOpencodeIsConfinedAndRouted(t *testing.T) {
 
 	marker := filepath.Join(dir, "HOST_RAN.txt")
 	if err := h.client.SendInput(context.Background(), h.ep, ws, res.SessionID,
-		"Use your bash tool to run exactly this command and then tell me what happened: echo ran > "+marker,
+		"Use your "+bashTool+" tool to run exactly this command and then tell me what happened: echo ran > "+marker,
 		core.SessionOptions{Execution: exe}); err != nil {
 		t.Fatalf("SendInput: %v", err)
 	}
@@ -586,6 +595,103 @@ func TestRealOpencodeIsConfinedAndRouted(t *testing.T) {
 	msgs, _, _ = h.client.Messages(context.Background(), h.ep, ws, res.SessionID, 0)
 	t.Logf("second turn: failed=%v replies=%q", ts.Failed, texts(msgs))
 	if _, err := os.Stat(marker); err == nil {
-		t.Fatal("the command ran on the host: the routing plugin did not take the bash call")
+		t.Fatal("the command ran on the host: the routing did not take the shell call")
+	}
+}
+
+func TestRealOpencodeIsConfinedAndRouted(t *testing.T) {
+	if os.Getenv("ACP_REAL_OPENCODE") != "1" {
+		t.Skip("set ACP_REAL_OPENCODE=1 to run the installed opencode")
+	}
+	realConfinedAndRouted(t, AgentConfig{Name: "opencode", Command: "opencode", Args: []string{"acp"}}, "bash")
+}
+
+func TestRealClaudeIsConfinedAndRouted(t *testing.T) {
+	if os.Getenv("ACP_REAL_CLAUDE") != "1" {
+		t.Skip("set ACP_REAL_CLAUDE=1 to run the Claude ACP agent through npx")
+	}
+	npx, err := exec.LookPath("npx")
+	if err != nil {
+		t.Skip("npx is not on PATH")
+	}
+	realConfinedAndRouted(t, AgentConfig{Name: "claude", Command: npx, Args: []string{"-y", "@agentclientprotocol/claude-agent-acp"}}, "Bash")
+}
+
+// The routing is recognised from the agent's command, as vmexec recognises a
+// harness from the executable: no setting is needed, and an explicit one
+// overrides.
+func TestSandboxRoutingIsRecognisedFromTheCommand(t *testing.T) {
+	for _, c := range []struct {
+		agent       AgentConfig
+		routing     string
+		noteHas     string
+		explanation string
+	}{
+		{AgentConfig{Command: "/Users/m/.opencode/bin/opencode", Args: []string{"acp"}}, "opencode", "", "opencode by path"},
+		{AgentConfig{Command: "opencode"}, "opencode", "", "opencode on PATH"},
+		{AgentConfig{Command: "/x/bin/npx", Args: []string{"-y", "@agentclientprotocol/claude-agent-acp"}}, "claude", "", "claude through npx"},
+		{AgentConfig{Command: "npx", Args: []string{"-y", "@agentclientprotocol/claude-agent-acp@1.2.3"}}, "claude", "", "claude, a pinned version"},
+		{AgentConfig{Command: "claude-code-acp"}, "claude", "", "claude by its other name"},
+		{AgentConfig{Command: "npx", Args: []string{"-y", "@agentclientprotocol/codex-acp"}}, "", "exec server", "codex is recognised and not implemented"},
+		{AgentConfig{Command: "gemini", Args: []string{"--acp"}}, "", "no sandbox routing is known", "an unknown agent"},
+		{AgentConfig{Command: "gemini", Sandbox: "opencode"}, "opencode", "", "an explicit routing wins"},
+		{AgentConfig{Command: "opencode", Sandbox: "off"}, "", "`sandbox` to off", "off turns it off"},
+	} {
+		routing, note := c.agent.sandboxRouting()
+		if routing != c.routing || (c.noteHas == "") != (note == "") || !strings.Contains(note, c.noteHas) {
+			t.Errorf("%s: routing=%q note=%q, want %q / %q", c.explanation, routing, note, c.routing, c.noteHas)
+		}
+	}
+}
+
+// A claude agent gets Claude Code's shell-prefix router: a link, named for the
+// router, to the helper, in the directory the agent can read and never write;
+// and its own npm cache, because npx would otherwise fail on npm's.
+func TestClaudeRoutingAndThePrivateNpmCache(t *testing.T) {
+	needSandboxHere(t)
+	a := fakeAgentConfig(t, "fake", nil)
+	a.Sandbox = sandboxRoutingClaude
+	h := newHarness(t, Config{Agents: []AgentConfig{a}})
+	vmexec, logPath := fakeVMExec(t)
+	dir := t.TempDir()
+	ws := h.workdirWorkspace(dir)
+	sid := h.sandboxSession(ws, sbExecution(dir, vmexec, "t", "sp"))
+	in := h.readInfo(ws, sid)
+	if filepath.Base(in.ClaudePrefix) != "bnbloc-vmexec-claude-prefix" || filepath.Dir(in.ClaudePrefix) != filepath.Dir(in.TokenFile) {
+		t.Fatalf("CLAUDE_CODE_SHELL_PREFIX = %q (token file %q)", in.ClaudePrefix, in.TokenFile)
+	}
+	if target, err := os.Readlink(in.ClaudePrefix); err != nil || target != vmexec {
+		t.Fatalf("the prefix link goes to %q, %v; want the helper %q", target, err, vmexec)
+	}
+	if in.Config != "" {
+		t.Fatalf("a claude agent got opencode's config directory: %q", in.Config)
+	}
+	if !strings.Contains(in.NPMCache, "npm-fake") || strings.HasPrefix(in.NPMCache, os.Getenv("HOME")+"/.npm") {
+		t.Fatalf("npm_config_cache = %q", in.NPMCache)
+	}
+	raw, _ := os.ReadFile(logPath)
+	joined := "\n" + strings.Join(strings.Split(strings.TrimSpace(strings.Split(string(raw), "---")[0]), "\n"), "\n") + "\n"
+	for _, want := range []string{"\n--harness\nclaude\n", "\n--allow-write\n" + in.NPMCache + "\n", "\n--allow-read\n" + in.NPMCache + "\n"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("confine lacks %q in %q", want, joined)
+		}
+	}
+	if strings.Contains(joined, "\n--harness\nopencode\n") {
+		t.Errorf("a claude agent was given opencode's profile: %q", joined)
+	}
+}
+
+func TestSandboxOffRefusesTheAgent(t *testing.T) {
+	needSandboxHere(t)
+	a := fakeAgentConfig(t, "fake", nil)
+	a.Sandbox = sandboxOff
+	h := newHarness(t, Config{Agents: []AgentConfig{a}})
+	vmexec, _ := fakeVMExec(t)
+	dir := t.TempDir()
+	ws := h.workdirWorkspace(dir)
+	_, err := h.client.CreateSession(h.ctx(), h.ep, core.SessionRequest{WorkspaceID: ws, TargetID: "fake", Prompt: "hi", Options: core.SessionOptions{Execution: sbExecution(dir, vmexec, "t", "sp")}})
+	var perr *protocol.ProtocolError
+	if !errors.As(err, &perr) || perr.Code != protocol.ErrorBadRequest || !strings.Contains(perr.Message, "off") {
+		t.Fatalf("err = %v", err)
 	}
 }

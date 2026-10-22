@@ -218,10 +218,18 @@ through client terminals, so a generic adapter cannot force the routing of its
 commands into a space. That is true of the routing and not of the confinement:
 the OS sandbox covers the agent process and everything it spawns.
 
-- An agent is configured with the routing its CLI has (`sandbox`, one today:
-  `opencode`, a `tool.execute.before` plugin that hands the bash tool's command
-  to `vmexec hook opencode`). An agent without one cannot run sandboxed; the
-  request is refused and nothing runs on the host.
+- The routing is recognised from the agent's command (`detectRouting`: the
+  executable and an npx-style package, as vmexec derives a harness from the
+  executable): opencode (a `tool.execute.before` plugin that hands the bash
+  tool's command to `vmexec hook opencode`) and Claude Code (the
+  `CLAUDE_CODE_SHELL_PREFIX` router, a link to vmexec in the token directory).
+  Codex is recognised and not implemented (an exec server and a Linux codex in
+  the space). An optional `sandbox` field overrides or turns it `off`. An agent
+  without a routing cannot run sandboxed; the request is refused, naming the
+  agent and why, and nothing runs on the host.
+- A launcher like npx installs into npm's cache, which the confinement keeps
+  read-only: a confined agent gets an npm cache of its own (`npm-<agent>`,
+  read-write to it, used by confined runs only).
 - The workspace is the sandbox workdir the bridge created
   (`CreateWorkspaceRequest.workdir`), adopted, never owned: delete forgets the
   record and leaves the directory. A workdir workspace takes only sandboxed

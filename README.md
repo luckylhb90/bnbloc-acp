@@ -51,7 +51,7 @@ Each agent uses its own sign-in (log in to Claude Code, Codex, … as usual).
 | `mcpServers` | MCP servers passed to every session. |
 | `profile` | How a session's expert profile maps onto this agent (below). |
 | `stderrActivity` | Log lines that mark a step of the running turn (below). |
-| `sandbox` | The routing that lets the agent run in the agent sandbox (`"opencode"`); empty = it cannot (below). |
+| `sandbox` | Optional: overrides the sandbox routing recognised from the command (`"opencode"`, `"claude"`) or turns it off (`"off"`) (below). |
 | `models`, `modelArgs` | A model catalog and the spawn args applying it, only for an agent that reports no model selector. |
 | `permissions.allow` | Tool kinds the adapter approves (below). |
 | `idleTimeout` | Stop an idle session's process after this long (it resumes on the next message). |
@@ -214,33 +214,38 @@ on the host. A session can instead run in bnbloc's agent sandbox, below.
 ## The agent sandbox
 
 With bnbloc's agent sandbox on (a member's mode `all`, or a borrowed run under
-the organization's policy) the bridge asks the core to run a session sandboxed,
-and the core does it for an agent whose CLI has a **routing** it implements,
-named by the agent's `sandbox` setting. One exists: `"opencode"`.
+the organization's policy) the bridge asks the core to run a session sandboxed.
+No setting is needed: the core recognises the agent's **routing** from its
+command (the executable and the package an `npx` is given), the way the
+sandbox helper recognises a harness from the executable.
 
-```json
-{ "name": "opencode", "command": "opencode", "args": ["acp"], "sandbox": "opencode" }
-```
+| Agent | Routing |
+|---|---|
+| `opencode` | a plugin the core loads through `OPENCODE_CONFIG_DIR` (the agent cannot edit it) |
+| `@agentclientprotocol/claude-agent-acp` | Claude Code's shell-prefix router (`CLAUDE_CODE_SHELL_PREFIX`) |
+| `@agentclientprotocol/codex-acp` | recognised, **not implemented yet** (needs an exec server in the space) |
+
+An agent that is none of these cannot run sandboxed: a sandboxed request for it
+is refused (`bad_request`, naming the agent and why), never run on the host.
+`bnbloc-acp check` shows which agents can. An agent's optional `sandbox` field
+overrides the recognition (`"opencode"`, `"claude"`) or turns the sandbox off for
+that agent (`"off"`).
 
 A sandboxed session runs the agent through `bnbloc-vmexec confine`: the OS
 sandbox covers the agent **and everything it spawns**, so it writes only its
 workspace and cannot read the adapter's home (the agents' config, every other
-workspace). The agent's shell commands are routed into the room's sandbox space
-(for opencode, by a plugin the core loads through `OPENCODE_CONFIG_DIR`, which
-the agent cannot edit). The exec token lives in a file the core renews at every
-input, never in the agent's environment. The ACP `terminal` client capability is
-not offered to a sandboxed agent (its commands would run on the host). Such a
-session's workspace is a directory the bridge made; deleting the workspace
-removes nothing in it.
+workspace). Its shell commands are routed into the room's sandbox space. The exec
+token lives in a file the core renews at every input, never in the agent's
+environment. The ACP `terminal` client capability is not offered (its commands
+would run on the host). An agent started through `npx` gets an npm cache of its
+own (the confinement keeps npm's read-only), used by confined runs only; the
+first start downloads the agent into it. The session's workspace is a directory
+the bridge made; deleting the workspace removes nothing in it.
 
-An agent **without** a `sandbox` setting cannot run sandboxed: a sandboxed
-request for it is refused (`bad_request`, naming the agent), never run on the
-host. `bnbloc-acp check` shows which agents can. The first sandboxed session of
-an opencode version prepares the routing's config directory (seconds to a
-minute); a request that times out meanwhile leaves the preparation running and
-the retry finds it done.
+A request that times out while the routing's config is first prepared leaves the
+preparation running, and the retry finds it done.
 
-Limit: the routing hooks opencode's bash tool. Another way to a shell (a
+Limit: the routing hooks the agent's bash tool. Another way to a shell (a
 subagent, an MCP server that runs commands) is confined but runs on the host
 inside the confinement, not in the VM.
 

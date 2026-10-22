@@ -657,6 +657,10 @@ func (s *session) setExecution(exe core.SandboxExecution) error {
 		return fmt.Errorf("the exec token file: %w", err)
 	}
 	s.mu.Lock()
+	if !s.sandboxed {
+		// Once, before any turn: a running turn reads the policy without the lock.
+		s.pol = policyFor(s.agent.Permissions, true)
+	}
 	s.sandboxed, s.exe = true, exe
 	s.mu.Unlock()
 	return nil

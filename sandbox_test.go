@@ -540,7 +540,7 @@ func realConfinedAndRouted(t *testing.T, agent AgentConfig, bashTool string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(acpHome) })
-	agent.Permissions = Permissions{Allow: []string{"*"}}
+	// No permissions setting either: a member's config has none.
 	h := newHarnessAt(t, Config{Agents: []AgentConfig{agent}}, acpHome)
 	if st := h.a.reg.statuses(); len(st) != 1 || !st[0].Available || st[0].Sandbox == "" {
 		t.Fatalf("%s is not available (or not sandbox-capable) through the adapter: %+v", agent.Name, st)
@@ -693,5 +693,50 @@ func TestSandboxOffRefusesTheAgent(t *testing.T) {
 	var perr *protocol.ProtocolError
 	if !errors.As(err, &perr) || perr.Code != protocol.ErrorBadRequest || !strings.Contains(perr.Message, "off") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// The point of the sandbox is that an agent runs commands: in a sandboxed
+// session its command execution is approved with no setting (its commands are
+// routed into the space), unlike a host session, where `execute` stays off
+// unless the operator allows it. An operator's own list is respected.
+func TestSandboxedSessionApprovesCommandsByDefault(t *testing.T) {
+	needSandboxHere(t)
+	old := warmOpencodeFn
+	warmOpencodeFn = func(context.Context, *sandboxLaunch, []string, string) error { return nil }
+	t.Cleanup(func() { warmOpencodeFn = old })
+	vmexec, _ := fakeVMExec(t)
+	ask := func(agent AgentConfig, sandboxed bool) string {
+		t.Helper()
+		h := newHarness(t, Config{Agents: []AgentConfig{agent}})
+		dir := t.TempDir()
+		var ws, sid string
+		if sandboxed {
+			ws = h.workdirWorkspace(dir)
+			sid = h.sandboxSession(ws, sbExecution(dir, vmexec, "t", "sp"))
+			h.readInfo(ws, sid)
+			h.sendSandboxed(ws, sid, "permission execute "+dir, sbExecution(dir, vmexec, "t", "sp"))
+		} else {
+			var root workspaceRoot
+			ws, root = h.workspace()
+			sid = h.session(ws, "fake", "hello", core.SessionOptions{})
+			h.settle(ws, sid)
+			h.send(ws, sid, "permission execute "+root.dir, core.SessionOptions{})
+		}
+		h.settle(ws, sid)
+		return h.lastText(ws, sid)
+	}
+	routed := fakeAgentConfig(t, "fake", nil)
+	routed.Sandbox = sandboxRoutingOpencode
+	if got := ask(routed, true); !strings.Contains(got, `"optionId":"yes"`) {
+		t.Errorf("a sandboxed agent's command was refused by default: %s", got)
+	}
+	if got := ask(fakeAgentConfig(t, "fake", nil), false); !strings.Contains(got, `"optionId":"no"`) {
+		t.Errorf("a host session approved a command with no setting: %s", got)
+	}
+	explicit := routed
+	explicit.Permissions = Permissions{Allow: []string{"read", "edit"}}
+	if got := ask(explicit, true); !strings.Contains(got, `"optionId":"no"`) {
+		t.Errorf("an operator's own list was overridden: %s", got)
 	}
 }

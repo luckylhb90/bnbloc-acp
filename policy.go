@@ -19,10 +19,20 @@ type policy struct {
 	allow map[string]bool
 }
 
-func newPolicy(p Permissions) policy {
+func newPolicy(p Permissions) policy { return policyFor(p, false) }
+
+// policyFor is the request policy of a session. A sandboxed session approves
+// command execution when the operator listed no kinds: the sandbox is what makes
+// it safe (the agent's commands are routed into the space), and an agent that
+// cannot run commands is not what a member turned the sandbox on for. An
+// operator's own list is respected either way.
+func policyFor(p Permissions, sandboxed bool) policy {
 	kinds := p.Allow
 	if kinds == nil {
 		kinds = defaultAllowKinds
+		if sandboxed {
+			kinds = append(append([]string(nil), kinds...), "execute")
+		}
 	}
 	out := policy{allow: map[string]bool{}}
 	for _, k := range kinds {

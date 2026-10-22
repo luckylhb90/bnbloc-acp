@@ -231,6 +231,10 @@ is refused (`bad_request`, naming the agent and why), never run on the host.
 overrides the recognition (`"opencode"`, `"claude"`) or turns the sandbox off for
 that agent (`"off"`).
 
+In a sandboxed session command execution is approved unless the agent's
+`permissions.allow` lists kinds (the commands are routed into the sandbox, which
+is what makes them safe); a host session still needs `execute` allowed.
+
 A sandboxed session runs the agent through `bnbloc-vmexec confine`: the OS
 sandbox covers the agent **and everything it spawns**, so it writes only its
 workspace and cannot read the adapter's home (the agents' config, every other

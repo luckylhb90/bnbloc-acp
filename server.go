@@ -166,6 +166,7 @@ func (a *adapter) deleteWorkspace(w http.ResponseWriter, r *http.Request) {
 	for _, s := range doomed {
 		s.close()
 	}
+	a.publishInUse(false)
 	if err := a.ws.remove(id); err != nil {
 		writeErr(w, internalErr("delete workspace", err))
 		return
@@ -276,6 +277,7 @@ func (a *adapter) createSession(w http.ResponseWriter, r *http.Request) {
 	a.sessions[s.id] = s
 	a.order[wsID] = append(a.order[wsID], s.id)
 	a.mu.Unlock()
+	a.publishInUse(false)
 	writeJSON(w, http.StatusOK, protocol.CreateSessionResponse{SessionID: s.id, Phase: "running"})
 }
 
@@ -404,6 +406,7 @@ func (a *adapter) listFiles(w http.ResponseWriter, r *http.Request) {
 func (a *adapter) reap(ctx context.Context) {
 	t := time.NewTicker(time.Minute)
 	defer t.Stop()
+	a.publishInUse(false)
 	for {
 		select {
 		case <-ctx.Done():
@@ -411,6 +414,7 @@ func (a *adapter) reap(ctx context.Context) {
 		case <-t.C:
 		}
 		a.reapOnce(a.reg.config().idle)
+		a.publishInUse(false) // the file is the core's word only while it is renewed
 	}
 }
 
@@ -448,6 +452,7 @@ func (a *adapter) close() {
 		}(s)
 	}
 	wg.Wait()
+	a.publishInUse(true)
 }
 
 func newID(prefix string) string {

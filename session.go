@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -511,6 +513,7 @@ func (s *session) ensureProc() (*agentProc, error) {
 		s.markLost()
 		return nil, errSessionLost
 	}
+	s.relaunchFromCurrent()
 	ctx, cancel := context.WithTimeout(s.ctx, handshakeTimeout)
 	defer cancel()
 	// The continued session wears the same profile: its files are written
@@ -561,6 +564,44 @@ func (s *session) ensureProc() (*agentProc, error) {
 	go s.watch(proc)
 	slog.Info("bnbloc-acp session continued in a new agent process", "agent", s.agent.Name, "session", s.id, "resumed", resumable)
 	return proc, nil
+}
+
+// relaunchFromCurrent keeps a conversation whose program was removed. A session
+// continues with the launch it was created with, and a managed agent's file can
+// be replaced or removed while the session is idle (an update, a rollback, a
+// removal). When a file that launch names is gone and the agent is registered
+// now with another launch, the session continues with that one: the agent keeps
+// the conversation in its own store, and a version that cannot read it fails the
+// continuation visibly, where a missing file would have lost the session at
+// once. Said in the log; a session whose files all exist is never touched.
+func (s *session) relaunchFromCurrent() {
+	s.mu.Lock()
+	launch := s.agent
+	s.mu.Unlock()
+	missing := ""
+	for _, ref := range launchRefs(launch) {
+		if filepath.IsAbs(ref) {
+			if _, err := os.Stat(ref); err != nil {
+				missing = ref
+				break
+			}
+		}
+	}
+	if missing == "" {
+		return
+	}
+	// The registration may have changed in the last seconds (an update writes it
+	// just before the next message): read it now, not at the next 30 s refresh.
+	s.reg.reload()
+	cur, ok := s.reg.config().Agent(launch.Name)
+	if !ok || (cur.Command == launch.Command && slices.Equal(cur.Args, launch.Args) && maps.Equal(cur.Env, launch.Env)) {
+		return
+	}
+	s.mu.Lock()
+	s.agent.Command, s.agent.Args, s.agent.Env = cur.Command, cur.Args, cur.Env
+	s.mu.Unlock()
+	slog.Warn("bnbloc-acp session continues with the agent's current launch: the file it was created with is gone",
+		"agent", launch.Name, "session", s.id, "missing", missing, "was", launch.Command, "now", cur.Command)
 }
 
 func (s *session) setLoading(v bool) {

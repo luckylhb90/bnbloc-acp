@@ -56,6 +56,25 @@ Each agent uses its own sign-in (log in to Claude Code, Codex, … as usual).
 | `permissions.allow` | Tool kinds the adapter approves (below). |
 | `idleTimeout` | Stop an idle session's process after this long (it resumes on the next message). |
 
+### Files an agent's sessions still need
+
+A session keeps the program it was created with and, after an idle stop, starts
+that same program again to continue the conversation. A file removed or replaced
+in between (an update by whatever manages the agent) would end the conversation.
+Two things keep it:
+
+- The core publishes what its live sessions run from in `<home>/in-use.json`: every
+  path in a session's launch (the command, its arguments, its environment
+  values), rewritten when a session starts or ends and every minute while the
+  core runs, with `stopped: true` when it exits cleanly. Whatever removes agent
+  files reads it first (the bnbloc agent manager does): a file that is listed is
+  kept, a file with no current word from the core is not removed.
+- When a file a session's launch names is gone anyway and the agent is registered
+  now with another launch, the session continues with that one, and the log says
+  so (`session continues with the agent's current launch`). The agent keeps the
+  conversation in its own store; a version that cannot read it fails the
+  continuation visibly instead of the session being lost at once.
+
 ### Agents another component manages
 
 Other components may give the core agents without editing your file: each puts

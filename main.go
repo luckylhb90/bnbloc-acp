@@ -175,7 +175,8 @@ func check(o options, out io.Writer) error {
 	}
 	cfg := reg.config()
 	if len(cfg.Agents) == 0 {
-		fmt.Fprintf(out, "no agents configured in %s\n", o.config)
+		fmt.Fprintf(out, "no agents configured in %s or %s\n", o.config, dropInPath(o.config))
+		printNotes(out, cfg)
 		return nil
 	}
 	results := make([]agentStatus, len(cfg.Agents))
@@ -206,7 +207,19 @@ func check(o options, out io.Writer) error {
 		}
 		fmt.Fprintf(tw, "%s\tavailable\t%s\t%s\t%s\n", st.Name, models, describeCatalog(st.ReasoningEfforts, st.DefaultReasoning), sandbox)
 	}
-	return tw.Flush()
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	printNotes(out, cfg)
+	return nil
+}
+
+// printNotes says what the merged config left out (a drop-in's agent that
+// agents.json already defines, an invalid drop-in).
+func printNotes(out io.Writer, cfg *Config) {
+	for _, n := range cfg.Notes {
+		fmt.Fprintf(out, "note: %s\n", n)
+	}
 }
 
 func describeCatalog(values []string, current string) string {

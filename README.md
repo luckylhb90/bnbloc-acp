@@ -56,6 +56,17 @@ Each agent uses its own sign-in (log in to Claude Code, Codex, … as usual).
 | `permissions.allow` | Tool kinds the adapter approves (below). |
 | `idleTimeout` | Stop an idle session's process after this long (it resumes on the next message). |
 
+### Agents another component manages
+
+Other components may give the core agents without editing your file: each puts
+its own `<home>/agents.d/<name>.json` (the same document as `agents.json`; only
+`agents` is read). The core reads them in file name order, merged **under** your
+`agents.json`: a name you define always wins, and among drop-ins the first
+file keeps a name. A drop-in that does not parse, or has an invalid entry, is
+skipped and its last valid copy stays; a file that is removed takes its agents
+with it. `bnbloc-acp check` lists every name left out and why. The bnbloc agent
+manager writes `agents.d/agent-manager.json` for the agents it installs.
+
 Check what works:
 
 ```sh

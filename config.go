@@ -19,6 +19,11 @@ type Config struct {
 	IdleTimeout string        `json:"idleTimeout,omitempty"`
 	Agents      []AgentConfig `json:"agents"`
 
+	// Notes say what was left out of the merged config and why (an agent a
+	// drop-in defines that agents.json already does, an invalid drop-in);
+	// `check` prints them. Never read from a file.
+	Notes []string `json:"-"`
+
 	idle time.Duration
 }
 

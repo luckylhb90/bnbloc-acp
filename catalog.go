@@ -68,31 +68,19 @@ type registry struct {
 
 	mu      sync.Mutex
 	cfg     *Config
-	stamp   fileStamp
+	stamp   string
+	drops   *dropCache
 	status  map[string]agentStatus
 	probing map[string]bool
 }
 
-type fileStamp struct {
-	mod  time.Time
-	size int64
-	ok   bool
-}
-
-func stampOf(path string) fileStamp {
-	st, err := os.Stat(path)
-	if err != nil {
-		return fileStamp{}
-	}
-	return fileStamp{mod: st.ModTime(), size: st.Size(), ok: true}
-}
-
 func newRegistry(path, probeDir string) (*registry, error) {
-	cfg, err := LoadConfig(path)
+	drops := &dropCache{}
+	cfg, err := loadAll(path, drops)
 	if err != nil {
 		return nil, err
 	}
-	return &registry{path: path, probeDir: probeDir, cfg: cfg, stamp: stampOf(path), status: map[string]agentStatus{}, probing: map[string]bool{}}, nil
+	return &registry{path: path, probeDir: probeDir, cfg: cfg, drops: drops, stamp: configStamp(path), status: map[string]agentStatus{}, probing: map[string]bool{}}, nil
 }
 
 func (r *registry) config() *Config {
@@ -104,14 +92,14 @@ func (r *registry) config() *Config {
 // reload re-reads the config when the file changed. An invalid edit keeps
 // the previous config (logged), so a typo never takes the core down.
 func (r *registry) reload() {
-	st := stampOf(r.path)
+	st := configStamp(r.path)
 	r.mu.Lock()
 	same := st == r.stamp
 	r.mu.Unlock()
 	if same {
 		return
 	}
-	cfg, err := LoadConfig(r.path)
+	cfg, err := loadAll(r.path, r.drops)
 	if err != nil {
 		slog.Warn("bnbloc-acp config invalid; keeping the previous one", "path", r.path, "error", err)
 		r.mu.Lock()

@@ -287,6 +287,9 @@ func (h sandboxHost) prepareLaunch(ctx context.Context, agent AgentConfig, s cor
 	envSB := s
 	envSB.ExecToken = ""
 	hc := s.HostConfine
+	// What the agent's config (and the components' drop-ins) keep from every
+	// confined run joins the descriptor's own, as environment and as flags.
+	hc.DenyRead = unionPaths(hc.DenyRead, agent.DenyRead)
 	env := protocol.VMExecEnv(protocol.SandboxExecution{
 		URL: envSB.URL, ExpiresAtMs: 0, Machine: envSB.Machine, Space: envSB.Space, VMExec: envSB.VMExec,
 		Workdir: envSB.Workdir, Mounts: wireMounts(envSB.Mounts), Passthrough: envSB.Passthrough, Env: envSB.Env,

@@ -434,6 +434,14 @@ func (f *fakeAgent) prompt(id json.RawMessage, p map[string]any) {
 		out, _ := json.Marshal(res)
 		f.text(string(out), "")
 		end("end_turn")
+	case "readable":
+		// readable PATH: whether this process can read the file, as one word.
+		if _, err := os.ReadFile(arg); err != nil {
+			f.text("denied", "")
+		} else {
+			f.text("readable", "")
+		}
+		end("end_turn")
 	case "permission":
 		kind, path, _ := strings.Cut(arg, " ")
 		res := f.call("session/request_permission", map[string]any{"sessionId": sid,

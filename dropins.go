@@ -12,7 +12,7 @@ import (
 
 // dropInDir is the directory, beside the config file, where another
 // component puts the agents it manages: <home>/agents.d/*.json, each file the
-// same document as agents.json (only its agents are read). The member's own
+// same document as agents.json (only its agents and its denyRead are read). The member's own
 // agents.json always wins on a name, so a hand-written entry is never
 // overridden; among drop-ins the file name order decides, and a name taken is
 // reported, never merged. Writers own their own file and nothing else
@@ -23,7 +23,13 @@ const dropInDir = "agents.d"
 // or broken one never removes agents that worked a moment ago.
 type dropCache struct {
 	mu   sync.Mutex
-	good map[string][]AgentConfig
+	good map[string]dropDoc
+}
+
+// dropDoc is what one drop-in file gives: its agents and its denyRead.
+type dropDoc struct {
+	agents   []AgentConfig
+	denyRead []string
 }
 
 func dropInPath(configPath string) string {
@@ -75,21 +81,22 @@ func loadAll(path string, cache *dropCache) (*Config, error) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	if cache.good == nil {
-		cache.good = map[string][]AgentConfig{}
+		cache.good = map[string]dropDoc{}
 	}
 	files := dropInFiles(path)
 	present := map[string]bool{}
 	for _, name := range files {
 		present[name] = true
-		agents, err := readDropIn(filepath.Join(dropInPath(path), name))
+		doc, err := readDropIn(filepath.Join(dropInPath(path), name))
 		if err != nil {
 			slog.Warn("bnbloc-acp drop-in invalid; keeping its last valid copy", "file", dropInDir+"/"+name, "error", err)
 			cfg.Notes = append(cfg.Notes, fmt.Sprintf("%s/%s is invalid and was not read: %v", dropInDir, name, err))
-			agents = cache.good[name]
+			doc = cache.good[name]
 		} else {
-			cache.good[name] = agents
+			cache.good[name] = doc
 		}
-		for _, a := range agents {
+		cfg.DenyRead = unionPaths(cfg.DenyRead, doc.denyRead)
+		for _, a := range doc.agents {
 			if by, dup := taken[a.Name]; dup {
 				cfg.Notes = append(cfg.Notes, fmt.Sprintf("agent %q in %s/%s is not used: %s already defines it", a.Name, dropInDir, name, by))
 				continue
@@ -103,18 +110,25 @@ func loadAll(path string, cache *dropCache) (*Config, error) {
 			delete(cache.good, name) // a removed file removes its agents
 		}
 	}
+	// What a component asks to keep from every confined agent applies to every
+	// agent of this core, the member's own entries included.
+	if len(cfg.DenyRead) > 0 {
+		for i := range cfg.Agents {
+			cfg.Agents[i].DenyRead = unionPaths(cfg.Agents[i].DenyRead, cfg.DenyRead)
+		}
+	}
 	return cfg, nil
 }
 
 // readDropIn parses one drop-in file with the same rules as agents.json.
-func readDropIn(path string) ([]AgentConfig, error) {
+func readDropIn(path string) (dropDoc, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return dropDoc{}, err
 	}
 	c, err := ParseConfig(raw)
 	if err != nil {
-		return nil, err
+		return dropDoc{}, err
 	}
-	return c.Agents, nil
+	return dropDoc{agents: c.Agents, denyRead: c.DenyRead}, nil
 }

@@ -51,6 +51,7 @@ Each agent uses its own sign-in (log in to Claude Code, Codex, … as usual).
 | `mcpServers` | MCP servers passed to every session. |
 | `profile` | How a session's expert profile maps onto this agent (below). |
 | `envProvider` | A program run for the agent on the host, never confined, whose output joins the agent's environment (below). |
+| `denyRead` | Absolute paths a sandboxed run of this agent may not read, added to the sandbox descriptor's own (below). |
 | `stderrActivity` | Log lines that mark a step of the running turn (below). |
 | `sandbox` | Optional: overrides the sandbox routing recognised from the command (`"opencode"`, `"claude"`) or turns it off (`"off"`) (below). |
 | `models`, `modelArgs` | A model catalog and the spawn args applying it, only for an agent that reports no model selector. |
@@ -96,6 +97,19 @@ of the split: a sandboxed agent's network is open, so a credential it can read i
 credential it can send away. The provider is where the credential lives; the agent
 is given the endpoint and, at most, a placeholder. The provider is the member's own
 configuration (or a component's drop-in), the same trust as the agent's command.
+
+### Keeping a credential from sandboxed agents (`denyRead`)
+
+The agent sandbox keeps a confined agent's network open and denies the credential
+stores it knows (SSH, cloud, git, the desktop's own). A tool on this machine that
+keeps a login of its own is not on that list, and a confined agent can read it and
+send it away. `denyRead` names such a path: per agent (`"denyRead": ["/abs/path"]`)
+or for every agent of the core, at the top level of `agents.json` or of a drop-in
+(the union of all of them applies to every agent, the member's own entries
+included). It joins the descriptor's `denyRead` as the helper's `--deny-read` flag
+and in the descriptor's environment. It can only restrict: a component that
+declares a path can make the sandbox stricter and cannot loosen it. Paths must be
+absolute.
 
 ### Agents another component manages
 

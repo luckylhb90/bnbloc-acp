@@ -868,3 +868,103 @@ func TestHomeIsAbsolute(t *testing.T) {
 		t.Fatalf("home = %q", o.home)
 	}
 }
+
+// A path an agent's config (or a component's drop-in, for every agent) keeps
+// from confined runs reaches the confining helper as a flag and in the
+// descriptor's environment, joined to the descriptor's own; a relative path is
+// refused; and a drop-in can only restrict.
+func TestDenyReadFromTheConfigJoinsTheDescriptors(t *testing.T) {
+	needSandboxHere(t)
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, dropInDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A component's drop-in names a credential store for every agent; the
+	// member's own entry has its own path.
+	if err := os.WriteFile(filepath.Join(home, dropInDir, "component.json"), []byte(`{"denyRead":["/h/.component/login"],"agents":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := warmOpencodeFn
+	warmOpencodeFn = func(context.Context, *sandboxLaunch, []string, string) error { return nil }
+	t.Cleanup(func() { warmOpencodeFn = old })
+	a := fakeAgentConfig(t, "fake", nil)
+	a.Sandbox = sandboxRoutingOpencode
+	a.DenyRead = []string{"/h/.own/secrets"}
+	h := newHarnessAt(t, Config{Agents: []AgentConfig{a}}, home)
+	vmexec, logPath := fakeVMExec(t)
+	dir := t.TempDir()
+	ws := h.workdirWorkspace(dir)
+	exe := sbExecution(dir, vmexec, "t", "space-a")
+	sid := h.sandboxSession(ws, exe)
+	in := h.readInfo(ws, sid)
+	raw, _ := os.ReadFile(logPath)
+	joined := "\n" + string(raw)
+	for _, p := range []string{"/h/.config/acme/mail", "/h/.own/secrets", "/h/.component/login"} {
+		if !strings.Contains(joined, "\n--deny-read\n"+p+"\n") {
+			t.Errorf("confine lacks --deny-read %s:\n%s", p, raw)
+		}
+		if !strings.Contains(in.DenyRead, p) {
+			t.Errorf("the descriptor's environment lacks %s: %q", p, in.DenyRead)
+		}
+	}
+	if _, err := ParseConfig([]byte(`{"agents":[{"name":"a","command":"x","denyRead":["relative/path"]}]}`)); err == nil {
+		t.Error("a relative denyRead was accepted")
+	}
+	if _, err := ParseConfig([]byte(`{"denyRead":["relative"],"agents":[]}`)); err == nil {
+		t.Error("a relative core-wide denyRead was accepted")
+	}
+}
+
+// The real helper: a file the config keeps from confined runs is read by the
+// agent without the setting and not with it. (The path is a dot directory under
+// the home, which the confinement reads by default.)
+func TestRealConfineHonoursDenyRead(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("the real Seatbelt profile (macOS)")
+	}
+	needSandboxHere(t)
+	bin := filepath.Join(t.TempDir(), "bnbloc-vmexec")
+	if out, err := execCommand(t, "go", "build", "-o", bin, "github.com/luckylhb90/bnbloc/cmd/bnbloc-vmexec"); err != nil {
+		t.Skipf("the sandbox helper cannot be built here: %v\n%s", err, out)
+	}
+	userHome, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home directory")
+	}
+	secretDir, err := os.MkdirTemp(userHome, ".bnbloc-acp-denyread-test-")
+	if err != nil {
+		t.Skipf("no place for the probe: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(secretDir) })
+	secret := filepath.Join(secretDir, "login")
+	if err := os.WriteFile(secret, []byte("a credential"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		deny []string
+		want string
+	}{{nil, "readable"}, {[]string{secretDir}, "denied"}} {
+		acpHome, err := os.MkdirTemp(userHome, ".bnbloc-acp-denyread-home-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.RemoveAll(acpHome) })
+		old := warmOpencodeFn
+		warmOpencodeFn = func(context.Context, *sandboxLaunch, []string, string) error { return nil }
+		a := fakeAgentConfig(t, "fake", nil)
+		a.Sandbox = sandboxRoutingOpencode
+		a.DenyRead = c.deny
+		h := newHarnessAt(t, Config{Agents: []AgentConfig{a}}, acpHome)
+		dir := t.TempDir()
+		ws := h.workdirWorkspace(dir)
+		exe := sbExecution(dir, bin, "t", "sp")
+		exe.Sandbox.HostConfine.DenyRead, exe.Sandbox.HostConfine.DenyWrite = nil, nil
+		sid := h.sandboxSession(ws, exe)
+		h.sendSandboxed(ws, sid, "readable "+secret, exe)
+		h.settle(ws, sid)
+		if got := h.lastText(ws, sid); got != c.want {
+			t.Errorf("denyRead %v: the confined agent's read of the file = %q, want %q", c.deny, got, c.want)
+		}
+		warmOpencodeFn = old
+	}
+}

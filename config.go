@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -18,6 +19,11 @@ type Config struct {
 	// ("30m" when empty; "0" keeps it until the adapter stops).
 	IdleTimeout string        `json:"idleTimeout,omitempty"`
 	Agents      []AgentConfig `json:"agents"`
+	// DenyRead lists absolute paths no confined run of any agent may read, in
+	// agents.json and in each drop-in (the union applies to every agent). It can
+	// only restrict: a component that keeps a credential on this machine names
+	// it here, whatever agent a member runs.
+	DenyRead []string `json:"denyRead,omitempty"`
 
 	// Notes say what was left out of the merged config and why (an agent a
 	// drop-in defines that agents.json already does, an invalid drop-in);
@@ -49,7 +55,10 @@ type AgentConfig struct {
 	// EnvProvider is a program run for the agent on the host, never confined,
 	// whose output is added to the agent's environment (envprovider.go).
 	EnvProvider *EnvProviderConfig `json:"envProvider,omitempty"`
-	Permissions Permissions        `json:"permissions,omitempty"`
+	// DenyRead lists absolute paths a confined run of this agent may not read,
+	// added to the sandbox descriptor's own. It can only restrict.
+	DenyRead    []string    `json:"denyRead,omitempty"`
+	Permissions Permissions `json:"permissions,omitempty"`
 	// Profile maps a session's agent profile (an expert's instructions,
 	// skills, MCP servers) onto this agent; nil = defaultProfileConfig.
 	Profile *ProfileConfig `json:"profile,omitempty"`
@@ -127,9 +136,15 @@ func (c *Config) validate() error {
 			c.idle = d
 		}
 	}
+	if err := validDenyRead("denyRead", c.DenyRead); err != nil {
+		return err
+	}
 	seen := map[string]bool{}
 	for i := range c.Agents {
 		a := &c.Agents[i]
+		if err := validDenyRead(fmt.Sprintf("agent %q: denyRead", a.Name), a.DenyRead); err != nil {
+			return err
+		}
 		if !agentNameRE.MatchString(a.Name) {
 			return fmt.Errorf("agents[%d].name %q: lowercase letters, digits, dot, underscore, dash", i, a.Name)
 		}
@@ -222,4 +237,30 @@ func (a AgentConfig) environ(extra ...string) []string {
 		out = append(out, k+"="+v)
 	}
 	return append(out, extra...)
+}
+
+// validDenyRead refuses a path that is not absolute (a relative one would mean
+// something else for every process that reads it).
+func validDenyRead(what string, paths []string) error {
+	for _, p := range paths {
+		if !filepath.IsAbs(p) {
+			return fmt.Errorf("%s %q: want an absolute path", what, p)
+		}
+	}
+	return nil
+}
+
+// unionPaths is a followed by the paths of b it does not have, cleaned.
+func unionPaths(a []string, b ...[]string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, list := range append([][]string{a}, b...) {
+		for _, p := range list {
+			if c := filepath.Clean(p); c != "" && !seen[c] {
+				seen[c] = true
+				out = append(out, c)
+			}
+		}
+	}
+	return out
 }

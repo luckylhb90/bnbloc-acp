@@ -92,6 +92,9 @@ type session struct {
 	thinking strings.Builder
 	cost     *costState
 	turnCost float64
+	// ctxUsed / ctxSize are the context the agent last reported this turn (a
+	// usage_update's used and size; 0 = not reported this turn).
+	ctxUsed, ctxSize int64
 	// refused lists the tool calls the policy refused during the turn, so a
 	// turn that ends without a reply says why.
 	refused []string
@@ -302,6 +305,9 @@ func (s *session) run() {
 		s.cancelled = false
 		s.status, s.statusServed = turnStatus{}, false
 		s.turnCost, s.refused, s.metaErr, s.metaLastErr = 0, nil, "", ""
+		// A number from an earlier turn is not this turn's: an agent that stops
+		// reporting must not keep showing its last one.
+		s.ctxUsed, s.ctxSize = 0, 0
 		s.startedAt, s.activity, s.deadlineHit = time.Now(), nil, false
 		if s.cost != nil {
 			s.turnCost = s.cost.amount
@@ -442,7 +448,8 @@ func (s *session) messageCount() int64 {
 
 // turnMetrics is the turn's usage on its last message: the model in force,
 // per-turn tokens when the agent reported them, the turn's USD cost when the
-// agent reports a cumulative session cost.
+// agent reports a cumulative session cost, and the context it holds
+// (contextTokens of contextWindow) when it reports a usage_update.
 func (s *session) turnMetrics(resp acpPromptResponse) map[string]any {
 	m := map[string]any{}
 	if opt, ok := findOption(s.options, configCategoryModel); ok && opt.current() != "" {
@@ -457,6 +464,11 @@ func (s *session) turnMetrics(resp acpPromptResponse) map[string]any {
 	}
 	if c := s.cost; c != nil && strings.EqualFold(c.currency, "USD") && c.amount >= s.turnCost {
 		m["costUsd"] = c.amount - s.turnCost
+	}
+	// How full the conversation is after this turn's last request (the agent's
+	// own count and window; the client shows them as a meter).
+	if s.ctxUsed > 0 && s.ctxSize > 0 {
+		m["contextTokens"], m["contextWindow"] = s.ctxUsed, s.ctxSize
 	}
 	return m
 }
@@ -770,6 +782,9 @@ func (s *session) Notify(method string, params json.RawMessage) {
 			s.noteActivity(activityTool, toolTitle(u), u.ToolCallID)
 		}
 	case "usage_update":
+		if u.Used > 0 && u.Size > 0 {
+			s.ctxUsed, s.ctxSize = u.Used, u.Size
+		}
 		if u.Cost != nil {
 			s.cost = &costState{amount: u.Cost.Amount, currency: u.Cost.Currency}
 		}

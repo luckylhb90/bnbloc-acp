@@ -263,6 +263,10 @@ func TestMessagesAggregateIntoCompletedReplies(t *testing.T) {
 	if m["model"] != "fake-small" || m["inputTokens"] != float64(3) || m["outputTokens"] != float64(2) || m["costUsd"] != 0.25 {
 		t.Fatalf("metrics = %+v", m)
 	}
+	// The agent's usage_update (used 100 of 1000) is how full its context is.
+	if m["contextTokens"] != float64(100) || m["contextWindow"] != float64(1000) {
+		t.Fatalf("context metrics = %v of %v, want 100 of 1000", m["contextTokens"], m["contextWindow"])
+	}
 
 	// A tool call between texts completes the first message; usage rides
 	// the turn's last message; cost is the turn's delta.
@@ -902,5 +906,23 @@ func TestContextOverflowClassification(t *testing.T) {
 		if contextOverflow(s) {
 			t.Errorf("an overflow: %q", s)
 		}
+	}
+}
+
+// The context numbers are the turn's own: absent until the agent reports both,
+// and never carried over from an earlier turn.
+func TestTurnMetricsReportContextOnlyWhenBothNumbersCame(t *testing.T) {
+	s := &session{}
+	if m := s.turnMetrics(acpPromptResponse{}); m["contextTokens"] != nil || m["contextWindow"] != nil {
+		t.Fatalf("a turn with no report carries context: %v", m)
+	}
+	s.ctxUsed = 5000 // a used without its size is not a meter
+	if m := s.turnMetrics(acpPromptResponse{}); m["contextTokens"] != nil {
+		t.Fatalf("used without size: %v", m)
+	}
+	s.ctxSize = 20000
+	m := s.turnMetrics(acpPromptResponse{})
+	if m["contextTokens"] != int64(5000) || m["contextWindow"] != int64(20000) {
+		t.Fatalf("metrics = %v", m)
 	}
 }

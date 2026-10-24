@@ -242,6 +242,10 @@ type acpSessionUpdate struct {
 		Amount   float64 `json:"amount"`
 		Currency string  `json:"currency"`
 	} `json:"cost"`
+	// A usage_update: the tokens the session's context holds now, and the
+	// model's context window.
+	Used int64 `json:"used"`
+	Size int64 `json:"size"`
 }
 
 type acpToolCallLocation struct {

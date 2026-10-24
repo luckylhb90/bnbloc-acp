@@ -379,6 +379,10 @@ func (f *fakeAgent) prompt(id json.RawMessage, p map[string]any) {
 	case "whoami":
 		f.text(whoami, "")
 		end("end_turn")
+	case "getenv":
+		// getenv NAME: the value in this process's environment.
+		f.text(os.Getenv(arg), "")
+		end("end_turn")
 	case "profile":
 		// profile NAME,NAME: the session's _meta, mcpServers and the named env.
 		f.mu.Lock()

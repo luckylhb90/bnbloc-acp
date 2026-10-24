@@ -50,6 +50,7 @@ Each agent uses its own sign-in (log in to Claude Code, Codex, … as usual).
 | `mode` | An ACP session mode applied to every session. |
 | `mcpServers` | MCP servers passed to every session. |
 | `profile` | How a session's expert profile maps onto this agent (below). |
+| `envProvider` | A program run for the agent on the host, never confined, whose output joins the agent's environment (below). |
 | `stderrActivity` | Log lines that mark a step of the running turn (below). |
 | `sandbox` | Optional: overrides the sandbox routing recognised from the command (`"opencode"`, `"claude"`) or turns it off (`"off"`) (below). |
 | `models`, `modelArgs` | A model catalog and the spawn args applying it, only for an agent that reports no model selector. |
@@ -74,6 +75,27 @@ Two things keep it:
   so (`session continues with the agent's current launch`). The agent keeps the
   conversation in its own store; a version that cannot read it fails the
   continuation visibly instead of the session being lost at once.
+
+### An environment for an agent (`envProvider`)
+
+An agent sometimes needs a value that cannot be written in a file: a local proxy
+that listens on a new port every time, a token that is renewed. `envProvider` is
+`{"command": "...", "args": [...]}`, a program the core starts **before** the agent,
+on the host and never confined, even when the session is sandboxed. It prints
+`NAME=VALUE` lines, then a line `READY`, and keeps running until its stdin closes
+(the core closes it when the agent's process ends, whatever the reason, and ends
+its process group after a short wait). The core adds the lines to the agent's
+environment: after the agent's own `env`, before the sandbox descriptor's, which
+wins. It never logs a value, refuses a name it keeps from agents (`BNBLOC_ACP_*`)
+and a line that is not `NAME=VALUE`, and when the provider ends before the agent the
+agent ends too (its endpoint is gone); the next input starts both again.
+
+The agent keeps its own `command`, so everything the core recognises from it, the
+sandbox routing above all, applies as if there were no provider. That is the point
+of the split: a sandboxed agent's network is open, so a credential it can read is a
+credential it can send away. The provider is where the credential lives; the agent
+is given the endpoint and, at most, a placeholder. The provider is the member's own
+configuration (or a component's drop-in), the same trust as the agent's command.
 
 ### Agents another component manages
 

@@ -31,6 +31,9 @@ type agentProc struct {
 	stderrDone chan struct{}
 	// onStderr reads each stderr line too (nil = none; stderr.go).
 	onStderr func(line string)
+	// provider is the agent's environment provider (nil = none): it lives and
+	// dies with this process.
+	provider *envProvider
 }
 
 // startAgent spawns the agent in dir, runs initialize (advertising the
@@ -50,6 +53,17 @@ func startAgentIn(ctx context.Context, a AgentConfig, args []string, dir string,
 	path, err := exec.LookPath(a.Command)
 	if err != nil {
 		return nil, fmt.Errorf("command %q not found: %w", a.Command, err)
+	}
+	// The environment provider runs first, on the host and never confined, even
+	// for a sandboxed session: it is where the credential lives, and the agent
+	// is given only what it prints.
+	var provider *envProvider
+	if a.EnvProvider != nil {
+		var providerEnv []string
+		if provider, providerEnv, err = startEnvProvider(ctx, a); err != nil {
+			return nil, err
+		}
+		extraEnv = append(append([]string(nil), extraEnv...), providerEnv...)
 	}
 	var cmd *exec.Cmd
 	if sb != nil {
@@ -86,12 +100,15 @@ func startAgentIn(ctx context.Context, a AgentConfig, args []string, dir string,
 		for _, f := range []*os.File{inR, inW, outR, outW, errR, errW} {
 			f.Close()
 		}
+		if provider != nil {
+			provider.close()
+		}
 		return nil, fmt.Errorf("start %s: %w", a.Name, err)
 	}
 	inR.Close()
 	outW.Close()
 	errW.Close()
-	p := &agentProc{name: a.Name, cmd: cmd, stdin: inW, exited: make(chan struct{}), stderr: &tailBuffer{max: 4 << 10}, stderrDone: make(chan struct{})}
+	p := &agentProc{name: a.Name, cmd: cmd, stdin: inW, exited: make(chan struct{}), stderr: &tailBuffer{max: 4 << 10}, stderrDone: make(chan struct{}), provider: provider}
 	if o, ok := h.(stderrObserver); ok && len(a.StderrActivity) > 0 {
 		p.onStderr = o.agentStderr
 	}
@@ -101,6 +118,9 @@ func startAgentIn(ctx context.Context, a AgentConfig, args []string, dir string,
 		_ = cmd.Wait()
 		close(p.exited)
 	}()
+	if provider != nil {
+		go provider.watch(p)
+	}
 	if err := p.handshake(ctx, a, sb == nil); err != nil {
 		p.stop()
 		return nil, p.diagnose(err)
@@ -208,6 +228,12 @@ func (p *agentProc) alive() bool {
 // stop ends the agent: close its stdin (an ACP agent exits on EOF), then
 // SIGTERM, then SIGKILL, a couple of seconds apart.
 func (p *agentProc) stop() {
+	defer func() {
+		// Its endpoint goes with the agent.
+		if p.provider != nil {
+			p.provider.close()
+		}
+	}()
 	_ = p.stdin.Close()
 	for _, step := range []func(){func() {}, func() { killTree(p.cmd, false) }, func() { killTree(p.cmd, true) }} {
 		step()

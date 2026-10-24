@@ -44,9 +44,12 @@ type AgentConfig struct {
 	// Models / ModelArgs apply only when the agent reports no model selector:
 	// the catalog to offer, and spawn args with {model} replaced by the
 	// chosen model.
-	Models      []string    `json:"models,omitempty"`
-	ModelArgs   []string    `json:"modelArgs,omitempty"`
-	Permissions Permissions `json:"permissions,omitempty"`
+	Models    []string `json:"models,omitempty"`
+	ModelArgs []string `json:"modelArgs,omitempty"`
+	// EnvProvider is a program run for the agent on the host, never confined,
+	// whose output is added to the agent's environment (envprovider.go).
+	EnvProvider *EnvProviderConfig `json:"envProvider,omitempty"`
+	Permissions Permissions        `json:"permissions,omitempty"`
 	// Profile maps a session's agent profile (an expert's instructions,
 	// skills, MCP servers) onto this agent; nil = defaultProfileConfig.
 	Profile *ProfileConfig `json:"profile,omitempty"`
@@ -158,6 +161,9 @@ func (c *Config) validate() error {
 			if err := a.StderrActivity[j].compile(); err != nil {
 				return fmt.Errorf("agent %q: stderrActivity[%d]: %w", a.Name, j, err)
 			}
+		}
+		if a.EnvProvider != nil && strings.TrimSpace(a.EnvProvider.Command) == "" {
+			return fmt.Errorf("agent %q: envProvider.command is required", a.Name)
 		}
 		if !validSandboxRouting(a.Sandbox) {
 			return fmt.Errorf("agent %q: sandbox %q is not a routing this core implements (%s, %s, or off)", a.Name, a.Sandbox, sandboxRoutingOpencode, sandboxRoutingClaude)

@@ -57,7 +57,14 @@ type AgentConfig struct {
 	EnvProvider *EnvProviderConfig `json:"envProvider,omitempty"`
 	// DenyRead lists absolute paths a confined run of this agent may not read,
 	// added to the sandbox descriptor's own. It can only restrict.
-	DenyRead    []string    `json:"denyRead,omitempty"`
+	DenyRead []string `json:"denyRead,omitempty"`
+	// CleanEnv drops the credentials the adapter's own environment carries (cloud
+	// and API keys, tokens, an ssh-agent socket: credentialEnvName) from a
+	// sandboxed run of this agent. A confined agent's network is open, so each is
+	// one it can send away. What the agent's own `env`, its environment provider
+	// and the sandbox descriptor set is kept. False (the usual): the agent
+	// inherits the environment, as an agent of the member's own may need to.
+	CleanEnv    bool        `json:"cleanEnv,omitempty"`
 	Permissions Permissions `json:"permissions,omitempty"`
 	// Profile maps a session's agent profile (an expert's instructions,
 	// skills, MCP servers) onto this agent; nil = defaultProfileConfig.
@@ -226,8 +233,22 @@ func (a AgentConfig) mcpServers() json.RawMessage {
 // environ is the agent's process environment: the adapter's own minus its
 // BNBLOC_ACP_* settings (a token must never reach an agent), plus env.
 func (a AgentConfig) environ(extra ...string) []string {
+	return a.environFrom(os.Environ(), extra...)
+}
+
+// sandboxedEnviron is environ for a confined run: with CleanEnv, the adapter's
+// inherited credentials stay out.
+func (a AgentConfig) sandboxedEnviron(extra ...string) []string {
+	inherited := os.Environ()
+	if a.CleanEnv {
+		inherited = withoutCredentialEnv(inherited)
+	}
+	return a.environFrom(inherited, extra...)
+}
+
+func (a AgentConfig) environFrom(inherited []string, extra ...string) []string {
 	var out []string
-	for _, kv := range os.Environ() {
+	for _, kv := range inherited {
 		if strings.HasPrefix(kv, "BNBLOC_ACP_") {
 			continue
 		}

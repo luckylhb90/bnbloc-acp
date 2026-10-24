@@ -68,7 +68,7 @@ func startAgentIn(ctx context.Context, a AgentConfig, args []string, dir string,
 	var cmd *exec.Cmd
 	if sb != nil {
 		cmd = sb.command(path, args)
-		cmd.Env = append(a.environ(extraEnv...), sb.env...)
+		cmd.Env = append(a.sandboxedEnviron(extraEnv...), sb.env...)
 	} else {
 		cmd = exec.Command(path, args...)
 		cmd.Dir = dir

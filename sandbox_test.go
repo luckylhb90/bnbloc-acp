@@ -968,3 +968,63 @@ func TestRealConfineHonoursDenyRead(t *testing.T) {
 		warmOpencodeFn = old
 	}
 }
+
+// An agent with cleanEnv runs confined without the credentials the adapter
+// inherited (its network is open: each is one it could send away), and keeps
+// what the member's config, the provider and the descriptor give it. An agent
+// without it inherits as before, and a host run is never cleaned.
+func TestCleanEnvKeepsInheritedCredentialsFromAConfinedAgent(t *testing.T) {
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "inherited-cloud-secret")
+	t.Setenv("ACME_API_TOKEN", "inherited-token")
+	t.Setenv("SSH_AUTH_SOCK", "/tmp/agent.sock")
+	t.Setenv("ACME_PLAIN_SETTING", "plain")
+	cfg, _, _ := fakeProvider(t, []string{"PROVIDED_API_TOKEN=from-provider"}, "")
+	read := func(clean, sandboxed bool, name string) string {
+		h := sandboxHarness(t, map[string]string{"EXPLICIT_API_TOKEN": "from-config"})
+		h.a.reg.cfg.Agents[0].CleanEnv = clean
+		h.a.reg.cfg.Agents[0].EnvProvider = cfg
+		if !sandboxed {
+			ws, _ := h.workspace()
+			sid := h.session(ws, "fake", "hasenv "+name, core.SessionOptions{})
+			h.settle(ws, sid)
+			return strings.TrimPrefix(h.lastText(ws, sid), "set:")
+		}
+		dir := t.TempDir()
+		ws := h.workdirWorkspace(dir)
+		vmexec, _ := fakeVMExec(t)
+		exe := sbExecution(dir, vmexec, "token-1", "space-a")
+		sid := h.sandboxSession(ws, exe)
+		h.sendSandboxed(ws, sid, "hasenv "+name, exe)
+		h.settle(ws, sid)
+		return strings.TrimPrefix(h.lastText(ws, sid), "set:")
+	}
+	for _, name := range []string{"AWS_SECRET_ACCESS_KEY", "ACME_API_TOKEN", "SSH_AUTH_SOCK"} {
+		if got := read(true, true, name); got != "unset" {
+			t.Errorf("cleanEnv: %s reached the confined agent (%q)", name, got)
+		}
+		if got := read(false, true, name); got == "unset" {
+			t.Errorf("without cleanEnv: %s was dropped though nobody asked", name)
+		}
+		if got := read(true, false, name); got == "unset" {
+			t.Errorf("cleanEnv: %s was dropped from a run on the host", name)
+		}
+	}
+	for name, want := range map[string]string{"ACME_PLAIN_SETTING": "plain", "EXPLICIT_API_TOKEN": "from-config", "PROVIDED_API_TOKEN": "from-provider", "BNBLOC_VMEXEC_SPACE": "space-a"} {
+		if got := read(true, true, name); got != want {
+			t.Errorf("cleanEnv: %s = %q in the confined agent, want %q", name, got, want)
+		}
+	}
+}
+
+func TestCredentialEnvNames(t *testing.T) {
+	for _, n := range []string{"JIRA_TOKEN", "OPENAI_API_KEY", "AWS_PROFILE", "GH_TOKEN", "NODE_AUTH_TOKEN", "DB_PASSWORD", "SSH_AUTH_SOCK", "GIT_CONFIG_KEY_0", "GIT_CONFIG_COUNT", "GOOGLE_APPLICATION_CREDENTIALS", "private_key"} {
+		if !credentialEnvName(n) {
+			t.Errorf("%s is not judged a credential", n)
+		}
+	}
+	for _, n := range []string{"PATH", "HOME", "LANG", "TMPDIR", "CLAUDE_CODE_MAX_OUTPUT_TOKENS", "MAX_THINKING_TOKENS", "KEYBOARD_LAYOUT", "OPENCODE_CONFIG_DIR", "ANTHROPIC_BASE_URL", "BNBLOC_VMEXEC_SPACE"} {
+		if credentialEnvName(n) {
+			t.Errorf("%s is judged a credential", n)
+		}
+	}
+}

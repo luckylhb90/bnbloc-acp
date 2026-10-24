@@ -383,6 +383,14 @@ func (f *fakeAgent) prompt(id json.RawMessage, p map[string]any) {
 		// getenv NAME: the value in this process's environment.
 		f.text(os.Getenv(arg), "")
 		end("end_turn")
+	case "hasenv":
+		// hasenv NAME: "set:<value>" or "unset" (a reply is never empty).
+		if v, ok := os.LookupEnv(arg); ok {
+			f.text("set:"+v, "")
+		} else {
+			f.text("unset", "")
+		}
+		end("end_turn")
 	case "profile":
 		// profile NAME,NAME: the session's _meta, mcpServers and the named env.
 		f.mu.Lock()

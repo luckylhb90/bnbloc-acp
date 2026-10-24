@@ -52,6 +52,7 @@ Each agent uses its own sign-in (log in to Claude Code, Codex, … as usual).
 | `profile` | How a session's expert profile maps onto this agent (below). |
 | `envProvider` | A program run for the agent on the host, never confined, whose output joins the agent's environment (below). |
 | `denyRead` | Absolute paths a sandboxed run of this agent may not read, added to the sandbox descriptor's own (below). |
+| `cleanEnv` | `true`: a sandboxed run does not inherit the credentials in the core's own environment (below). Default `false`. |
 | `stderrActivity` | Log lines that mark a step of the running turn (below). |
 | `sandbox` | Optional: overrides the sandbox routing recognised from the command (`"opencode"`, `"claude"`) or turns it off (`"off"`) (below). |
 | `models`, `modelArgs` | A model catalog and the spawn args applying it, only for an agent that reports no model selector. |
@@ -110,6 +111,20 @@ included). It joins the descriptor's `denyRead` as the helper's `--deny-read` fl
 and in the descriptor's environment. It can only restrict: a component that
 declares a path can make the sandbox stricter and cannot loosen it. Paths must be
 absolute.
+
+### Keeping the core's own environment from sandboxed agents (`cleanEnv`)
+
+An agent inherits the core's environment, and a confined agent's network is open: a
+cloud key, an API token or an ssh-agent socket exported in the shell that started
+the core is one it can send away (the socket signs with the member's keys though
+`~/.ssh` is unreadable). An agent that needs none of them (one whose endpoint and
+credential come from its `envProvider`, say) sets `"cleanEnv": true`: a **sandboxed**
+run then starts without the inherited variables that are credentials or channels to
+one, judged by name (`TOKEN`, `SECRET`, `PASSWORD`, `API_KEY`, `ACCESS_KEY`,
+`PRIVATE_KEY`, `CREDENTIALS`, cloud-provider families such as `AWS_`, `SSH_AUTH_SOCK`,
+git's `GIT_CONFIG_KEY_n`). What the agent's own `env`, its provider and the sandbox
+descriptor set is kept, and a run on the host is never cleaned. It is off by default:
+an agent of the member's own may need an inherited key.
 
 ### Agents another component manages
 

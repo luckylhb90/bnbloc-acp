@@ -107,6 +107,7 @@ func startAgentIn(ctx context.Context, a AgentConfig, args []string, dir string,
 			provider.close()
 		}
 		if sb != nil {
+			sb.distrust()
 			sb.release()
 		}
 		return nil, fmt.Errorf("start %s: %w", a.Name, err)
@@ -128,6 +129,7 @@ func startAgentIn(ctx context.Context, a AgentConfig, args []string, dir string,
 		go provider.watch(p)
 	}
 	if err := p.handshake(ctx, a, sb == nil); err != nil {
+		sb.distrust()
 		p.stop()
 		return nil, p.diagnose(err)
 	}

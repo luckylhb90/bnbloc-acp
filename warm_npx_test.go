@@ -194,3 +194,48 @@ func TestWarmNpxEndsAStalledInstall(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// At start the entries the install step did not finish are removed (each is
+// replaced by a seeded one at its next start) and the finished ones are kept.
+func TestSweepRemovesOnlyUnfinishedNpxEntries(t *testing.T) {
+	state := t.TempDir()
+	mk := func(space, hash string, finished bool) string {
+		e := filepath.Join(state, "npm-"+space, "_npx", hash)
+		if err := os.MkdirAll(filepath.Join(e, "node_modules"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if finished {
+			if err := os.WriteFile(filepath.Join(e, npxMarker), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return e
+	}
+	whole, legacy, half := mk("a", "1111", true), mk("b", "2222", false), mk("c", "3333", false)
+	sweepUntrustedNpx(state)
+	for e, want := range map[string]bool{whole: true, legacy: false, half: false} {
+		if _, err := os.Stat(e); (err == nil) != want {
+			t.Errorf("%s: kept=%v, want %v", e, err == nil, want)
+		}
+	}
+}
+
+// An agent that failed to start from an entry makes it untrusted: the next start
+// replaces it. A launch with no npx entry (an agent not run through npx) is left alone.
+func TestDistrustRemovesTheMarker(t *testing.T) {
+	entry := t.TempDir()
+	marker := filepath.Join(entry, npxMarker)
+	if err := os.WriteFile(marker, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	(&sandboxLaunch{}).distrust()
+	var none *sandboxLaunch
+	none.distrust()
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("a launch without an entry removed a marker: %v", err)
+	}
+	(&sandboxLaunch{npxEntry: entry}).distrust()
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("the entry is still trusted")
+	}
+}

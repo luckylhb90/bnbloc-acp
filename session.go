@@ -166,6 +166,7 @@ func (s *session) open(ctx context.Context, first turnInput) error {
 	var resp acpSessionResponse
 	if err := proc.call(hctx, methodSessionNew, acpNewSessionRequest{Cwd: s.ws.dir, McpServers: servers, Meta: profileMeta(s.profile, pc)}, &resp); err != nil {
 		err = proc.diagnose(err)
+		launch.distrust()
 		proc.stop()
 		return fmt.Errorf("session/new: %w", err)
 	}

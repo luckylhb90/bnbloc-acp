@@ -242,6 +242,19 @@ type sandboxLaunch struct {
 	// cleanups end what the routing started beside the agent (codex: the bridge
 	// into the space); they run when the agent stops, or when it never started.
 	cleanups []func()
+	// npxEntry is the npm cache entry the agent runs from ("" = none): the one
+	// whose install step finished (warm_npx.go).
+	npxEntry string
+}
+
+// distrust is called when an agent failed to start or to open its session from
+// this launch: the cache entry it ran from may be the cause (an install that
+// is whole to npm and not to the agent), so it loses its marker and the next
+// start replaces it, from the host's copy, in seconds.
+func (l *sandboxLaunch) distrust() {
+	if l != nil && l.npxEntry != "" {
+		_ = os.Remove(filepath.Join(l.npxEntry, npxMarker))
+	}
 }
 
 // release runs the cleanups, once.
@@ -285,7 +298,10 @@ func (h sandboxHost) removeToken(sessionID string) { _ = os.RemoveAll(h.tokenDir
 
 // sweep removes every session's token directory (at start: no session survives
 // the process, so what is there is a crash's leftover).
-func (h sandboxHost) sweep() { _ = os.RemoveAll(filepath.Join(h.stateDir, "sessions")) }
+func (h sandboxHost) sweep() {
+	_ = os.RemoveAll(filepath.Join(h.stateDir, "sessions"))
+	sweepUntrustedNpx(h.stateDir)
+}
 
 // prepareLaunch builds the confined launch of an agent for the session's
 // current descriptor: the token file, the routing's config, the confine flags
@@ -349,6 +365,7 @@ func (h sandboxHost) prepareLaunch(ctx context.Context, agent AgentConfig, s cor
 		if err := warmNpx(ctx, l, env, npmDir, spec); err != nil {
 			return nil, err
 		}
+		l.npxEntry = filepath.Join(npmDir, "_npx", npxHash(spec))
 	}
 
 	switch routing {

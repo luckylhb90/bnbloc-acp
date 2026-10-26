@@ -1147,3 +1147,70 @@ func TestCredentialEnvNames(t *testing.T) {
 		}
 	}
 }
+
+// The real agent's package, damaged after its install step finished (its platform
+// binary cut short, as a cut-off install leaves it), heals: the start that fails
+// makes the entry untrusted and the next one replaces it.
+func TestRealClaudeHealsADamagedCache(t *testing.T) {
+	if os.Getenv("ACP_REAL_CLAUDE") != "1" {
+		t.Skip("set ACP_REAL_CLAUDE=1 to run the Claude ACP agent through npx")
+	}
+	if runtime.GOOS != "darwin" {
+		t.Skip("the real Seatbelt profile (macOS)")
+	}
+	npx, err := exec.LookPath("npx")
+	if err != nil {
+		t.Skip("npx is not on PATH")
+	}
+	bin := filepath.Join(t.TempDir(), "bnbloc-vmexec")
+	if out, err := execCommand(t, "go", "build", "-o", bin, "github.com/luckylhb90/bnbloc/cmd/bnbloc-vmexec"); err != nil {
+		t.Fatalf("build the helper: %v\n%s", err, out)
+	}
+	userHome, _ := os.UserHomeDir()
+	acpHome, err := os.MkdirTemp(userHome, ".bnbloc-acp-real-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(acpHome) })
+	agent := AgentConfig{Name: "claude", Command: npx, Args: []string{"-y", "@agentclientprotocol/claude-agent-acp"}}
+	h := newHarnessAt(t, Config{Agents: []AgentConfig{agent}}, acpHome)
+	dir := t.TempDir()
+	exe := sbExecution(dir, bin, "unused-token", "heal-space")
+	exe.Sandbox.URL = "http://127.0.0.1:9"
+	exe.Sandbox.HostConfine.DenyRead, exe.Sandbox.HostConfine.DenyWrite = nil, nil
+	create := func() error {
+		ws := h.workdirWorkspace(dir)
+		_, err := h.client.CreateSession(context.Background(), h.ep, core.SessionRequest{WorkspaceID: ws, TargetID: "claude",
+			Prompt: "Reply with exactly the word ok.", Options: core.SessionOptions{Execution: exe}})
+		return err
+	}
+	for attempt := 0; create() != nil; attempt++ {
+		if attempt >= 3 {
+			t.Fatal("the first start never succeeded")
+		}
+	}
+	matches, _ := filepath.Glob(filepath.Join(acpHome, "sandbox", "npm-claude-*", "_npx", "*", "node_modules", "@anthropic-ai", "claude-agent-sdk-darwin-arm64", "claude"))
+	if len(matches) != 1 {
+		t.Fatalf("the agent's platform binary: %v", matches)
+	}
+	whole, _ := os.Stat(matches[0])
+	if err := os.Truncate(matches[0], whole.Size()*9/10); err != nil {
+		t.Fatal(err)
+	}
+	failed := 0
+	for attempt := 0; ; attempt++ {
+		err := create()
+		if err == nil {
+			break
+		}
+		failed++
+		t.Logf("start on the damaged cache: %v", err)
+		if attempt >= 3 {
+			t.Fatalf("the cache never healed: %v", err)
+		}
+	}
+	if healed, _ := os.Stat(matches[0]); healed == nil || healed.Size() != whole.Size() {
+		t.Errorf("the platform binary was not replaced: %v (want %d bytes)", healed, whole.Size())
+	}
+	t.Logf("healed after %d failed start(s)", failed)
+}

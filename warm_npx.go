@@ -218,3 +218,20 @@ func cloneNpxEntry(from, to string) {
 		_ = os.RemoveAll(tmp)
 	}
 }
+
+// sweepUntrustedNpx removes the cache entries the install step did not finish
+// (a half install, or a full copy made before the step existed): none is used
+// again, each is replaced by a seeded one at its space's next start, and a
+// full copy of a package is hundreds of megabytes. At start no agent runs from
+// any of them.
+func sweepUntrustedNpx(stateDir string) {
+	entries, _ := filepath.Glob(filepath.Join(stateDir, "npm-*", "_npx", "*"))
+	for _, e := range entries {
+		if st, err := os.Stat(e); err != nil || !st.IsDir() {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(e, npxMarker)); err != nil {
+			_ = os.RemoveAll(e)
+		}
+	}
+}

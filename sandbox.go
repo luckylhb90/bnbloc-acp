@@ -343,6 +343,13 @@ func (h sandboxHost) prepareLaunch(ctx context.Context, agent AgentConfig, s cor
 	}
 	env = append(env, "npm_config_cache="+npmDir)
 	l.flags = append(l.flags, "--allow-read", npmDir, "--allow-write", npmDir)
+	// The package is installed before the agent starts, outside the handshake's
+	// clock, so a slow download is not cut off into a cache that looks installed.
+	if spec := agent.npxSpec(); spec != "" {
+		if err := warmNpx(ctx, l, env, npmDir, spec); err != nil {
+			return nil, err
+		}
+	}
 
 	switch routing {
 	case sandboxRoutingOpencode:
@@ -490,7 +497,7 @@ func warmOpencode(ctx context.Context, l *sandboxLaunch, env []string, dir strin
 	if opencodeConfigWarm(dir, ver) {
 		return nil
 	}
-	return warmFlight(ctx, dir, func(run context.Context) error { return runOpencodeWarm(run, l, env, dir, bin, ver) })
+	return warmFlight(ctx, dir, "the opencode routing config", 3*time.Minute, func(run context.Context) error { return runOpencodeWarm(run, l, env, dir, bin, ver) })
 }
 
 // warmFlights are the preparations in progress, by directory.
@@ -504,16 +511,20 @@ type flight struct {
 	err  error
 }
 
-// warmFlight runs do once at a time for key, in its own context, and waits for
-// it as long as ctx allows.
-func warmFlight(ctx context.Context, key string, do func(context.Context) error) error {
+// warmFlight runs do once at a time for key, in its own context (limit bounds
+// it; 0 = no bound, do watches its own progress), and waits for it as long as
+// ctx allows. what names the preparation in the message of a request that gave up.
+func warmFlight(ctx context.Context, key, what string, limit time.Duration, do func(context.Context) error) error {
 	warmMu.Lock()
 	f := warmFlights[key]
 	if f == nil {
 		f = &flight{done: make(chan struct{})}
 		warmFlights[key] = f
 		go func() {
-			run, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			run, cancel := context.WithCancel(context.Background())
+			if limit > 0 {
+				run, cancel = context.WithTimeout(context.Background(), limit)
+			}
 			defer cancel()
 			f.err = do(run)
 			warmMu.Lock()
@@ -527,7 +538,7 @@ func warmFlight(ctx context.Context, key string, do func(context.Context) error)
 	case <-f.done:
 		return f.err
 	case <-ctx.Done():
-		return fmt.Errorf("the opencode routing config is still being prepared (try again shortly): %w", ctx.Err())
+		return fmt.Errorf("%s is still being prepared (try again shortly): %w", what, ctx.Err())
 	}
 }
 

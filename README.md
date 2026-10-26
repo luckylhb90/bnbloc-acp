@@ -320,6 +320,16 @@ is refused (`bad_request`, naming the agent and why), never run on the host.
 overrides the recognition (`"opencode"`, `"claude"`, `"codex"`) or turns the sandbox off for
 that agent (`"off"`).
 
+An agent launched through `npx` runs from an npm cache of its own per sandbox
+space (a package a prompt-injected agent plants there is run by that space
+alone). Its package is installed in a step before the agent starts, not inside
+the start's own time limit: the step has no time limit, only a stall one (90 s
+with no progress), and a cache entry is trusted only once the step finished (a
+marker file), so a half install is replaced, never reused. The entry is seeded
+from the host's own npm cache when that has the package (a copy-on-write clone
+on macOS: seconds, no extra disk), so the download is paid once per machine, not
+once per room.
+
 In a sandboxed session command execution is approved unless the agent's
 `permissions.allow` lists kinds (the commands are routed into the sandbox, which
 is what makes them safe); a host session still needs `execute` allowed.

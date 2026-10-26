@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -11,6 +12,15 @@ import (
 	"github.com/luckylhb90/bnbloc/core"
 )
 
+// skipWithoutSh skips a test whose provider is a #!/bin/sh script: Windows cannot
+// run one (the provider's own code is covered by the other platforms).
+func skipWithoutSh(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the test provider is a shell script")
+	}
+}
+
 // fakeProvider is an environment provider script. It records each start (its pid
 // on a line of "started") and its end ("stopped", written when its stdin
 // closes), prints the given lines and READY, then waits for stdin to close, as a
@@ -18,6 +28,7 @@ import (
 // ends early).
 func fakeProvider(t *testing.T, lines []string, after string) (cfg *EnvProviderConfig, started, stopped string) {
 	t.Helper()
+	skipWithoutSh(t)
 	dir := t.TempDir()
 	started, stopped = filepath.Join(dir, "started"), filepath.Join(dir, "stopped")
 	var b strings.Builder
@@ -108,6 +119,7 @@ func TestEnvProviderVariablesReachTheAgentAndItEndsWithIt(t *testing.T) {
 // core keeps from agents refuses the session with the reason, and its stderr
 // (local diagnostics) never reaches the wire.
 func TestEnvProviderFailuresRefuseTheSession(t *testing.T) {
+	skipWithoutSh(t)
 	script := func(body string) *EnvProviderConfig {
 		p := filepath.Join(t.TempDir(), "p")
 		if err := os.WriteFile(p, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {

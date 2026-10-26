@@ -59,6 +59,29 @@ Each agent uses its own sign-in (log in to Claude Code, Codex, … as usual).
 | `permissions.allow` | Tool kinds the adapter approves (below). |
 | `idleTimeout` | Stop an idle session's process after this long (it resumes on the next message). |
 
+### Agents that exist only in the sandbox
+
+An agent installed in the member's agent sandbox and nowhere else is configured
+with `"sandbox": "guest"`; its `command` is a command line **of the guest** (a
+shell line: `$HOME/agents/x/node_modules/.bin/x` works), run through
+`bnbloc-vmexec run --stdio`:
+
+```json
+{ "name": "x", "command": "$HOME/agents/x/node_modules/.bin/x", "args": ["acp"], "sandbox": "guest" }
+```
+
+- Nothing of the agent runs on the computer: a request without a sandbox is
+  refused (never started on the host), and the agent is listed at once without
+  being probed there (its models appear after its first session). Its target
+  carries `requiresSandbox: true`, which makes the bridge run it sandboxed or not
+  at all and never lend it to anyone else (its sign-in exists only for its owner).
+- It takes no `env`, `envProvider` or `models` yet (its environment is the
+  guest's own); a conversation survives the idle stop and an update as any
+  other.
+- Its files are in the guest, so `in-use.json` lists its guest paths and the
+  "program is gone" fallback below does not apply to it.
+- Design: bnbloc `docs/prd/2026-10-26-sandbox-only-agents-design.md`.
+
 ### Files an agent's sessions still need
 
 A session keeps the program it was created with and, after an idle stop, starts

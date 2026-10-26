@@ -579,6 +579,9 @@ func (s *session) relaunchFromCurrent() {
 	s.mu.Lock()
 	launch := s.agent
 	s.mu.Unlock()
+	if launch.guestOnly() {
+		return // its files are in the guest: not ours to look for on the host
+	}
 	missing := ""
 	for _, ref := range launchRefs(launch) {
 		if filepath.IsAbs(ref) {

@@ -187,6 +187,11 @@ func (c *Config) validate() error {
 		if a.EnvProvider != nil && strings.TrimSpace(a.EnvProvider.Command) == "" {
 			return fmt.Errorf("agent %q: envProvider.command is required", a.Name)
 		}
+		if a.guestOnly() {
+			if len(a.Env) > 0 || a.EnvProvider != nil || len(a.Models) > 0 {
+				return fmt.Errorf("agent %q: a guest agent (sandbox \"guest\") takes no env, envProvider or models yet: its environment is the guest's own", a.Name)
+			}
+		}
 		if !validSandboxRouting(a.Sandbox) {
 			return fmt.Errorf("agent %q: sandbox %q is not a routing this core implements (%s, %s, %s, or off)", a.Name, a.Sandbox, sandboxRoutingOpencode, sandboxRoutingClaude, sandboxRoutingCodex)
 		}

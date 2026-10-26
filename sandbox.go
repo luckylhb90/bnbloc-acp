@@ -42,13 +42,19 @@ const (
 	sandboxRoutingOpencode = "opencode"
 	sandboxRoutingClaude   = "claude"
 	sandboxRoutingCodex    = "codex"
-	sandboxOff             = "off"
+	// sandboxGuest: the agent is not on this computer at all: its command is a
+	// command line of the member's sandbox guest (an agent installed there and
+	// nowhere else), started through `vmexec run --stdio`. A guest agent runs
+	// only sandboxed: a request without an execution is refused, never run on
+	// the host (docs/prd/2026-10-26-sandbox-only-agents-design.md).
+	sandboxGuest = "guest"
+	sandboxOff   = "off"
 )
 
 // validSandboxRouting reports a value of an agent's `sandbox` setting. It is
 // optional: an agent is recognised by its command (detectRouting).
 func validSandboxRouting(s string) bool {
-	return s == "" || s == sandboxRoutingOpencode || s == sandboxRoutingClaude || s == sandboxRoutingCodex || s == sandboxOff
+	return s == "" || s == sandboxRoutingOpencode || s == sandboxRoutingClaude || s == sandboxRoutingCodex || s == sandboxGuest || s == sandboxOff
 }
 
 // detectRouting is the routing an agent's command names, the way vmexec derives
@@ -96,6 +102,9 @@ func routingOfName(name string) (routing, note string) {
 	}
 	return "", ""
 }
+
+// guestOnly reports an agent that exists only in the member's sandbox.
+func (a AgentConfig) guestOnly() bool { return a.Sandbox == sandboxGuest }
 
 // sandboxRouting is the agent's routing: its `sandbox` setting, or the one its
 // command names. note says why there is none.
@@ -186,6 +195,10 @@ type sandboxHost struct {
 // made in a sandbox workdir takes only sandboxed sessions, and a sandboxed
 // session needs such a workspace, at the descriptor's workdir.
 func checkExecution(agent AgentConfig, ws workspaceRoot, exe *protocol.Execution) (*core.SandboxExecution, error) {
+	if exe == nil && agent.guestOnly() {
+		// There is no host copy to run: nothing but a sandboxed session works.
+		return nil, refuse("the agent %s exists only in the agent sandbox and runs only there: this request carries no sandbox", agent.Name)
+	}
 	if exe == nil {
 		if ws.workdirBacked {
 			return nil, refuse("this workspace was made in the sandbox workdir and takes only sandboxed sessions")
@@ -242,6 +255,9 @@ type sandboxLaunch struct {
 	// cleanups end what the routing started beside the agent (codex: the bridge
 	// into the space); they run when the agent stops, or when it never started.
 	cleanups []func()
+	// guest: the agent is a command line of the guest, started through
+	// `vmexec run --stdio` (no confinement of a host process: there is none).
+	guest bool
 	// npxEntry is the npm cache entry the agent runs from ("" = none): the one
 	// whose install step finished (warm_npx.go).
 	npxEntry string
@@ -269,6 +285,17 @@ func (l *sandboxLaunch) release() {
 // confine replaces itself with the agent (exec), so stopping the process stops
 // the agent.
 func (l *sandboxLaunch) command(path string, args []string) *exec.Cmd {
+	if l.guest {
+		// path is the agent's command line in the guest (a shell command line:
+		// `$HOME/agents/x/bin/x` works), its arguments quoted for that shell.
+		line := path
+		for _, a := range args {
+			line += " " + shellQuote(a)
+		}
+		cmd := exec.Command(l.vmexec, "run", "--stdio", "--", line)
+		cmd.Dir = l.dir
+		return cmd
+	}
 	argv := append([]string{"confine"}, l.flags...)
 	argv = append(argv, "--", path)
 	argv = append(argv, args...)
@@ -333,6 +360,13 @@ func (h sandboxHost) prepareLaunch(ctx context.Context, agent AgentConfig, s cor
 
 	routing, _ := agent.sandboxRouting()
 	l := &sandboxLaunch{vmexec: s.VMExec, dir: s.Workdir, home: h.home}
+	if agent.guestOnly() {
+		// Nothing of the agent runs on the host: no confinement profile, no npm
+		// cache, no routing hook (every command it runs is already in the guest).
+		// The descriptor's environment and the token file are all the helper needs.
+		l.guest, l.env = true, env
+		return l, nil
+	}
 	for _, hn := range sandboxHarnesses(routing) {
 		l.flags = append(l.flags, "--harness", hn)
 	}
@@ -723,4 +757,12 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 		return err
 	}
 	return os.Rename(name, path)
+}
+
+// shellQuote quotes one argument for a POSIX shell.
+func shellQuote(s string) string {
+	if s != "" && strings.Trim(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@%+=:,./-_") == "" {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

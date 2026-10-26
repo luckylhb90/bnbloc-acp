@@ -53,8 +53,11 @@ func startAgent(ctx context.Context, a AgentConfig, args []string, dir string, h
 // adapter would run their commands on the host; the agent uses its own tools,
 // which are confined and routed).
 func startAgentIn(ctx context.Context, a AgentConfig, args []string, dir string, sb *sandboxLaunch, h rpcHandler, extraEnv ...string) (*agentProc, error) {
-	path, err := exec.LookPath(a.Command)
-	if err != nil {
+	var path string
+	var err error
+	if sb != nil && sb.guest {
+		path = a.Command // a command line of the guest: not looked up here
+	} else if path, err = exec.LookPath(a.Command); err != nil {
 		return nil, fmt.Errorf("command %q not found: %w", a.Command, err)
 	}
 	// The environment provider runs first, on the host and never confined, even

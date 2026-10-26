@@ -180,6 +180,21 @@ func (r *registry) refresh(ctx context.Context) {
 // sent.
 func (r *registry) probe(ctx context.Context, a AgentConfig) agentStatus {
 	st := agentStatus{Name: a.Name, CheckedAtMs: time.Now().UnixMilli()}
+	if a.guestOnly() {
+		// It exists only in the member's sandbox, which this core cannot reach
+		// outside a session (it holds no sandbox descriptor between turns), and
+		// it is never started on the host. It is listed at once; its models and
+		// MCP transports appear when a live session reports them (observe).
+		r.mu.Lock()
+		prev, seen := r.status[a.Name]
+		r.mu.Unlock()
+		if seen && prev.Available {
+			prev.CheckedAtMs = st.CheckedAtMs
+			return prev
+		}
+		st.Available = true
+		return st
+	}
 	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 	if err := os.MkdirAll(r.probeDir, 0o700); err != nil {
@@ -276,7 +291,7 @@ func (r *registry) targets() []protocol.Target {
 		if !ok || !st.Available {
 			continue
 		}
-		t := protocol.Target{ID: a.Name, Provider: a.Name, ReasoningEfforts: st.ReasoningEfforts, DefaultReasoning: st.DefaultReasoning, MCPTransports: st.MCPTransports}
+		t := protocol.Target{ID: a.Name, Provider: a.Name, ReasoningEfforts: st.ReasoningEfforts, DefaultReasoning: st.DefaultReasoning, MCPTransports: st.MCPTransports, RequiresSandbox: a.guestOnly()}
 		if st.ModelSelector {
 			t.Models, t.DefaultModel = st.Models, st.DefaultModel
 		} else if len(a.Models) > 0 {

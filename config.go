@@ -74,7 +74,7 @@ type AgentConfig struct {
 	// (stderr.go).
 	StderrActivity []StderrRule `json:"stderrActivity,omitempty"`
 	// Sandbox overrides the routing this agent's CLI has for running its shell
-	// commands in the agent sandbox's space: "opencode", "claude", or "off".
+	// commands in the agent sandbox's space: "opencode", "claude", "codex", or "off".
 	// Empty (the usual): the routing is recognised from the command, as vmexec
 	// recognises a harness from the executable (sandbox.go). An agent with none
 	// cannot run sandboxed, and a sandboxed request for it is refused.
@@ -188,7 +188,7 @@ func (c *Config) validate() error {
 			return fmt.Errorf("agent %q: envProvider.command is required", a.Name)
 		}
 		if !validSandboxRouting(a.Sandbox) {
-			return fmt.Errorf("agent %q: sandbox %q is not a routing this core implements (%s, %s, or off)", a.Name, a.Sandbox, sandboxRoutingOpencode, sandboxRoutingClaude)
+			return fmt.Errorf("agent %q: sandbox %q is not a routing this core implements (%s, %s, %s, or off)", a.Name, a.Sandbox, sandboxRoutingOpencode, sandboxRoutingClaude, sandboxRoutingCodex)
 		}
 		for _, k := range a.Permissions.Allow {
 			if k != "*" && !toolKinds[k] {

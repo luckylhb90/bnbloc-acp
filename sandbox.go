@@ -28,23 +28,27 @@ import (
 	"time"
 
 	"github.com/luckylhb90/bnbloc/core"
+	"github.com/luckylhb90/bnbloc/core/execbridge"
 	"github.com/luckylhb90/bnbloc/core/protocol"
 )
 
 // The routings implemented: how an agent's CLI hands its shell commands to the
 // sandbox. opencode: a tool.execute.before plugin. claude: Claude Code's
-// CLAUDE_CODE_SHELL_PREFIX router. sandboxOff turns the sandbox off for one
+// CLAUDE_CODE_SHELL_PREFIX router. codex: its remote executor
+// (CODEX_EXEC_SERVER_URL) is a bridge into the space (core/execbridge).
+// sandboxOff turns the sandbox off for one
 // agent (a request for it is refused).
 const (
 	sandboxRoutingOpencode = "opencode"
 	sandboxRoutingClaude   = "claude"
+	sandboxRoutingCodex    = "codex"
 	sandboxOff             = "off"
 )
 
 // validSandboxRouting reports a value of an agent's `sandbox` setting. It is
 // optional: an agent is recognised by its command (detectRouting).
 func validSandboxRouting(s string) bool {
-	return s == "" || s == sandboxRoutingOpencode || s == sandboxRoutingClaude || s == sandboxOff
+	return s == "" || s == sandboxRoutingOpencode || s == sandboxRoutingClaude || s == sandboxRoutingCodex || s == sandboxOff
 }
 
 // detectRouting is the routing an agent's command names, the way vmexec derives
@@ -88,7 +92,7 @@ func routingOfName(name string) (routing, note string) {
 	case "claude-agent-acp", "claude-code-acp", "@agentclientprotocol/claude-agent-acp", "@zed-industries/claude-code-acp":
 		return sandboxRoutingClaude, ""
 	case "codex-acp", "@agentclientprotocol/codex-acp", "@zed-industries/codex-acp":
-		return "", "its routing (an exec server in the sandbox space) is not implemented in this core yet"
+		return sandboxRoutingCodex, ""
 	}
 	return "", ""
 }
@@ -154,6 +158,8 @@ func sandboxHarnesses(routing string) []string {
 		return []string{"opencode", "claude"}
 	case sandboxRoutingClaude:
 		return []string{"claude"}
+	case sandboxRoutingCodex:
+		return []string{"codex"}
 	}
 	return []string{"generic"}
 }
@@ -233,6 +239,17 @@ type sandboxLaunch struct {
 	flags  []string // vmexec confine flags
 	env    []string // the descriptor's and the routing's environment, PWD
 	dir    string   // the workdir
+	// cleanups end what the routing started beside the agent (codex: the bridge
+	// into the space); they run when the agent stops, or when it never started.
+	cleanups []func()
+}
+
+// release runs the cleanups, once.
+func (l *sandboxLaunch) release() {
+	for _, f := range l.cleanups {
+		f()
+	}
+	l.cleanups = nil
 }
 
 // command is `<vmexec> confine <flags> -- <agent path> <args>`, in the workdir:
@@ -346,9 +363,46 @@ func (h sandboxHost) prepareLaunch(ctx context.Context, agent AgentConfig, s cor
 			return nil, fmt.Errorf("claude shell-prefix link: %w", err)
 		}
 		env = append(env, "CLAUDE_CODE_SHELL_PREFIX="+link)
+	case sandboxRoutingCodex:
+		url, err := l.prepareCodex(ctx, env, s)
+		if err != nil {
+			return nil, err
+		}
+		env = append(env, execbridge.EnvURL+"="+url)
 	}
 	l.env = env
 	return l, nil
+}
+
+// prepareCodex starts the bridge that carries codex's commands into the space:
+// codex dials the URL it returns and each connection runs a `codex exec-server`
+// there through `vmexec run --stdio`. A space-scoped exec token can publish no
+// guest port, so the bridge is the forwarding. The space must have a codex
+// binary; a preflight turns its absence into a refusal that says so, not an
+// opaque connection failure mid-turn.
+func (l *sandboxLaunch) prepareCodex(ctx context.Context, env []string, s core.SandboxExecution) (string, error) {
+	spawn := func(c context.Context, args ...string) *exec.Cmd {
+		cmd := exec.CommandContext(c, s.VMExec, args...)
+		cmd.Dir = s.Workdir
+		cmd.Env = append(os.Environ(), env...)
+		return cmd
+	}
+	pc, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	out, err := spawn(pc, "run", "--", "command -v codex").CombinedOutput()
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && ee.ExitCode() == 1 {
+			return "", refuse("codex is not installed in the sandbox space (no `codex` on its PATH), so codex cannot run sandboxed here")
+		}
+		return "", fmt.Errorf("sandbox preflight (vmexec run): %w: %s", err, tailText(string(out), 400))
+	}
+	br, err := execbridge.Start(spawn)
+	if err != nil {
+		return "", err
+	}
+	l.cleanups = append(l.cleanups, br.Close)
+	return br.URL(), nil
 }
 
 func wireMounts(ms []core.PathMount) []protocol.PathMount {

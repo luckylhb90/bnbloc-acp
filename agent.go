@@ -34,6 +34,9 @@ type agentProc struct {
 	// provider is the agent's environment provider (nil = none): it lives and
 	// dies with this process.
 	provider *envProvider
+	// launch is the sandboxed launch the agent runs under (nil on the host); its
+	// cleanups end with the agent.
+	launch *sandboxLaunch
 }
 
 // startAgent spawns the agent in dir, runs initialize (advertising the
@@ -103,12 +106,15 @@ func startAgentIn(ctx context.Context, a AgentConfig, args []string, dir string,
 		if provider != nil {
 			provider.close()
 		}
+		if sb != nil {
+			sb.release()
+		}
 		return nil, fmt.Errorf("start %s: %w", a.Name, err)
 	}
 	inR.Close()
 	outW.Close()
 	errW.Close()
-	p := &agentProc{name: a.Name, cmd: cmd, stdin: inW, exited: make(chan struct{}), stderr: &tailBuffer{max: 4 << 10}, stderrDone: make(chan struct{}), provider: provider}
+	p := &agentProc{name: a.Name, cmd: cmd, stdin: inW, exited: make(chan struct{}), stderr: &tailBuffer{max: 4 << 10}, stderrDone: make(chan struct{}), provider: provider, launch: sb}
 	if o, ok := h.(stderrObserver); ok && len(a.StderrActivity) > 0 {
 		p.onStderr = o.agentStderr
 	}
@@ -232,6 +238,9 @@ func (p *agentProc) stop() {
 		// Its endpoint goes with the agent.
 		if p.provider != nil {
 			p.provider.close()
+		}
+		if p.launch != nil {
+			p.launch.release()
 		}
 	}()
 	_ = p.stdin.Close()

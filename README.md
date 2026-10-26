@@ -54,7 +54,7 @@ Each agent uses its own sign-in (log in to Claude Code, Codex, … as usual).
 | `denyRead` | Absolute paths a sandboxed run of this agent may not read, added to the sandbox descriptor's own (below). |
 | `cleanEnv` | `true`: a sandboxed run does not inherit the credentials in the core's own environment (below). Default `false`. |
 | `stderrActivity` | Log lines that mark a step of the running turn (below). |
-| `sandbox` | Optional: overrides the sandbox routing recognised from the command (`"opencode"`, `"claude"`) or turns it off (`"off"`) (below). |
+| `sandbox` | Optional: overrides the sandbox routing recognised from the command (`"opencode"`, `"claude"`, `"codex"`) or turns it off (`"off"`) (below). |
 | `models`, `modelArgs` | A model catalog and the spawn args applying it, only for an agent that reports no model selector. |
 | `permissions.allow` | Tool kinds the adapter approves (below). |
 | `idleTimeout` | Stop an idle session's process after this long (it resumes on the next message). |
@@ -312,12 +312,12 @@ sandbox helper recognises a harness from the executable.
 |---|---|
 | `opencode` | a plugin the core loads through `OPENCODE_CONFIG_DIR` (the agent cannot edit it) |
 | `@agentclientprotocol/claude-agent-acp` | Claude Code's shell-prefix router (`CLAUDE_CODE_SHELL_PREFIX`) |
-| `@agentclientprotocol/codex-acp` | recognised, **not implemented yet** (needs an exec server in the space) |
+| `@agentclientprotocol/codex-acp` | codex's remote executor (`CODEX_EXEC_SERVER_URL`): a loopback bridge, served while the agent lives, runs a `codex exec-server` in the room's space for each connection. The space needs a `codex` on its PATH (else the request is refused, saying so); the sandbox helper must be the one that lets codex keep its state database (sandbox package 0.1.8 or newer) |
 
 An agent that is none of these cannot run sandboxed: a sandboxed request for it
 is refused (`bad_request`, naming the agent and why), never run on the host.
 `bnbloc-acp check` shows which agents can. An agent's optional `sandbox` field
-overrides the recognition (`"opencode"`, `"claude"`) or turns the sandbox off for
+overrides the recognition (`"opencode"`, `"claude"`, `"codex"`) or turns the sandbox off for
 that agent (`"off"`).
 
 In a sandboxed session command execution is approved unless the agent's

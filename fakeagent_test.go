@@ -439,7 +439,7 @@ func (f *fakeAgent) prompt(id json.RawMessage, p map[string]any) {
 			"tokenEnv": os.Getenv("BNBLOC_VMEXEC_TOKEN"), "tokenFile": tokenFile, "token": string(raw),
 			"config": os.Getenv("OPENCODE_CONFIG_DIR"), "space": os.Getenv("BNBLOC_VMEXEC_SPACE"),
 			"denyRead": os.Getenv("BNBLOC_CONFINE_DENY_READ"), "acpEnvLeak": os.Getenv("BNBLOC_ACP_TOKEN") != "",
-			"claudePrefix": os.Getenv("CLAUDE_CODE_SHELL_PREFIX"), "npmCache": os.Getenv("npm_config_cache"),
+			"claudePrefix": os.Getenv("CLAUDE_CODE_SHELL_PREFIX"), "execServer": os.Getenv("CODEX_EXEC_SERVER_URL"), "npmCache": os.Getenv("npm_config_cache"),
 		})
 		f.text(string(info), "")
 		end("end_turn")

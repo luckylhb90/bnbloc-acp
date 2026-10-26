@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/luckylhb90/bnbloc/core"
 	"github.com/luckylhb90/bnbloc/core/protocol"
 )
@@ -100,7 +103,9 @@ type procInfo struct {
 	// ClaudePrefix and NPMCache are the claude routing's prefix and the
 	// confined agent's own npm cache.
 	ClaudePrefix string `json:"claudePrefix"`
-	NPMCache     string `json:"npmCache"`
+	// ExecServer is codex's remote executor, the bridge into the space.
+	ExecServer string `json:"execServer"`
+	NPMCache   string `json:"npmCache"`
 }
 
 func (h *harness) info(ws, sid string) procInfo {
@@ -133,7 +138,7 @@ func TestSandboxConfigValidation(t *testing.T) {
 	for _, c := range []struct {
 		sandbox string
 		ok      bool
-	}{{"", true}, {"opencode", true}, {"claude", true}, {"off", true}, {"codex", false}, {"OpenCode", false}} {
+	}{{"", true}, {"opencode", true}, {"claude", true}, {"off", true}, {"codex", true}, {"OpenCode", false}} {
 		_, err := ParseConfig([]byte(`{"agents":[{"name":"a","command":"x","sandbox":"` + c.sandbox + `"}]}`))
 		if (err == nil) != c.ok {
 			t.Errorf("sandbox %q: err = %v, want ok=%v", c.sandbox, err, c.ok)
@@ -635,7 +640,7 @@ func TestSandboxRoutingIsRecognisedFromTheCommand(t *testing.T) {
 		{AgentConfig{Command: "/x/bin/npx", Args: []string{"-y", "@agentclientprotocol/claude-agent-acp"}}, "claude", "", "claude through npx"},
 		{AgentConfig{Command: "npx", Args: []string{"-y", "@agentclientprotocol/claude-agent-acp@1.2.3"}}, "claude", "", "claude, a pinned version"},
 		{AgentConfig{Command: "claude-code-acp"}, "claude", "", "claude by its other name"},
-		{AgentConfig{Command: "npx", Args: []string{"-y", "@agentclientprotocol/codex-acp"}}, "", "exec server", "codex is recognised and not implemented"},
+		{AgentConfig{Command: "npx", Args: []string{"-y", "@agentclientprotocol/codex-acp"}}, "codex", "", "codex through npx"},
 		{AgentConfig{Command: "gemini", Args: []string{"--acp"}}, "", "no sandbox routing is known", "an unknown agent"},
 		{AgentConfig{Command: "gemini", Sandbox: "opencode"}, "opencode", "", "an explicit routing wins"},
 		{AgentConfig{Command: "opencode", Sandbox: "off"}, "", "`sandbox` to off", "off turns it off"},
@@ -681,6 +686,120 @@ func TestClaudeRoutingAndThePrivateNpmCache(t *testing.T) {
 	}
 	if strings.Contains(joined, "\n--harness\nopencode\n") {
 		t.Errorf("a claude agent was given opencode's profile: %q", joined)
+	}
+}
+
+// fakeVMExecCodex is fakeVMExec that also answers the space's `command -v codex`
+// (found or not) and the exec-server `run --stdio`, which it echoes line by line.
+func fakeVMExecCodex(t *testing.T, haveCodex bool) (path, log string) {
+	t.Helper()
+	dir := t.TempDir()
+	log = filepath.Join(dir, "calls.log")
+	path = filepath.Join(dir, "bnbloc-vmexec")
+	found := "exit 1"
+	if haveCodex {
+		found = "exit 0"
+	}
+	script := `#!/bin/sh
+{ printf '%s\n' "$@"; echo '---'; } >> "` + log + `"
+if [ "$1" = run ] && [ "$2" = -- ]; then ` + found + `; fi
+if [ "$1" = run ]; then exec cat; fi
+[ "$1" = confine ] || exit 64
+shift
+while [ "$1" != "--" ]; do shift; done
+shift
+exec "$@"
+`
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path, log
+}
+
+// A codex agent runs with its own profile alone and a remote executor that is a
+// bridge into the space: the URL is loopback, it is served while the agent
+// lives, and a connection to it runs the exec-server in the space (not on the
+// host) through the helper. The space is asked first whether it has codex.
+func TestCodexRoutingBridgesItsExecutorIntoTheSpace(t *testing.T) {
+	needSandboxHere(t)
+	a := fakeAgentConfig(t, "fake", nil)
+	a.Sandbox = sandboxRoutingCodex
+	h := newHarness(t, Config{Agents: []AgentConfig{a}})
+	vmexec, logPath := fakeVMExecCodex(t, true)
+	dir := t.TempDir()
+	ws := h.workdirWorkspace(dir)
+	sid := h.sandboxSession(ws, sbExecution(dir, vmexec, "t", "sp"))
+	in := h.readInfo(ws, sid)
+	u, err := url.Parse(in.ExecServer)
+	if err != nil || u.Scheme != "ws" || !strings.HasPrefix(u.Host, "127.0.0.1:") || len(u.Path) < 16 {
+		t.Fatalf("CODEX_EXEC_SERVER_URL = %q, %v", in.ExecServer, err)
+	}
+	c, _, err := websocket.Dial(h.ctx(), in.ExecServer, nil)
+	if err != nil {
+		t.Fatalf("dial the bridge: %v", err)
+	}
+	defer c.CloseNow()
+	if err := c.Write(h.ctx(), websocket.MessageText, []byte(`{"id":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, got, err := c.Read(h.ctx()); err != nil || strings.TrimSpace(string(got)) != `{"id":1}` {
+		t.Fatalf("echoed through the space: %q, %v", got, err)
+	}
+	raw, _ := os.ReadFile(logPath)
+	joined := "\n" + string(raw)
+	for _, want := range []string{"\nrun\n--\ncommand -v codex\n", "\nrun\n--stdio\n--\ncodex\nexec-server\n--listen\nstdio\n", "\n--harness\ncodex\n"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("the helper was not called with %q: %q", want, joined)
+		}
+	}
+	if strings.Contains(joined, "\n--harness\nclaude\n") || strings.Contains(joined, "\n--harness\nopencode\n") {
+		t.Errorf("a codex agent was given another agent's profile: %q", joined)
+	}
+}
+
+// The bridge ends with the agent: no listener outlives the process it served.
+func TestCodexBridgeEndsWithTheAgent(t *testing.T) {
+	needSandboxHere(t)
+	a := fakeAgentConfig(t, "fake", nil)
+	a.Sandbox = sandboxRoutingCodex
+	h := newHarness(t, Config{Agents: []AgentConfig{a}})
+	vmexec, _ := fakeVMExecCodex(t, true)
+	dir := t.TempDir()
+	ws := h.workdirWorkspace(dir)
+	sid := h.sandboxSession(ws, sbExecution(dir, vmexec, "t", "sp"))
+	in := h.readInfo(ws, sid)
+	u, _ := url.Parse(in.ExecServer)
+	if conn, err := net.DialTimeout("tcp", u.Host, time.Second); err != nil {
+		t.Fatalf("the bridge is not served while the agent lives: %v", err)
+	} else {
+		conn.Close()
+	}
+	h.a.close()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", u.Host, 200*time.Millisecond)
+		if err != nil {
+			return
+		}
+		conn.Close()
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("the bridge still listens after the agent stopped")
+}
+
+// A space without codex is a refusal that says so, before the agent starts.
+func TestCodexRoutingRefusesASpaceWithoutCodex(t *testing.T) {
+	needSandboxHere(t)
+	a := fakeAgentConfig(t, "fake", nil)
+	a.Sandbox = sandboxRoutingCodex
+	h := newHarness(t, Config{Agents: []AgentConfig{a}})
+	vmexec, _ := fakeVMExecCodex(t, false)
+	dir := t.TempDir()
+	ws := h.workdirWorkspace(dir)
+	_, err := h.client.CreateSession(h.ctx(), h.ep, core.SessionRequest{WorkspaceID: ws, TargetID: "fake", Prompt: "hi", Options: core.SessionOptions{Execution: sbExecution(dir, vmexec, "t", "sp")}})
+	var perr *protocol.ProtocolError
+	if !errors.As(err, &perr) || perr.Code != protocol.ErrorBadRequest || !strings.Contains(perr.Message, "codex is not installed") {
+		t.Fatalf("err = %v", err)
 	}
 }
 

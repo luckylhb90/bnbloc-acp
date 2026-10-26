@@ -1,2 +1,4 @@
-github.com/luckylhb90/bnbloc v0.1.1-0.20261026000021-ca8e72478f5e h1:Ucf+cQ9ILioCUTRI87xl2ViSEkYTkVH1K2v5sIix6e4=
-github.com/luckylhb90/bnbloc v0.1.1-0.20261026000021-ca8e72478f5e/go.mod h1:NvPFA5HZA9LkYRb17Nv+mCSnftrtWAobBp//6AcEXuo=
+github.com/coder/websocket v1.8.15 h1:6B2JPeOGlpff2Uz6vOEH1Vzpi0iUz20A+lPVhPHtNUA=
+github.com/coder/websocket v1.8.15/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
+github.com/luckylhb90/bnbloc v0.1.1-0.20261026102300-f10bc40c6ff4 h1:iqVE6DsJ2fwalJML1H5qBaAYWWpRkDPa0tZ5IAzD6YY=
+github.com/luckylhb90/bnbloc v0.1.1-0.20261026102300-f10bc40c6ff4/go.mod h1:NvPFA5HZA9LkYRb17Nv+mCSnftrtWAobBp//6AcEXuo=

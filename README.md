@@ -166,6 +166,14 @@ the reason and offers no target; nothing else breaks.
   is never resumed.
 - **Turns** run one at a time; input sent during a turn is queued; interrupt
   cancels the turn (`session/cancel`) and drops the queue.
+- **Steering** (capability `steer`): a message sent while a turn runs can join
+  it. For an agent that advertises `_meta.steering.supported` in `initialize`
+  the adapter forwards it as `_session/steering` (with `idleBehavior:
+  promptRequired`): `injected` joins the turn, `promptRequired` answers `idle`
+  (nothing consumed, the caller sends an ordinary input), an agent that does
+  not advertise it or refuses answers `unsupported` (the caller queues). A turn
+  an agent started by itself on an idle steer is cancelled and answered `idle`.
+  Nothing is sent to an agent that did not advertise steering.
 - **Deadlines:** a session create or input may carry `deadlineMs` (the
   caller owns how long a turn may run). A turn still running then is
   cancelled (`session/cancel`; the agent process is stopped if it has not

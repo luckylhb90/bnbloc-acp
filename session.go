@@ -667,6 +667,46 @@ func (s *session) interrupt() {
 	}
 }
 
+// steer folds text into the running turn when the agent takes it
+// (`_session/steering`, docs/prd/2026-10-25-steer-a-running-turn.md in bnbloc):
+// injected, idle (no turn runs; nothing was consumed) or unsupported (the
+// agent does not offer steering, or refused; nothing was consumed). It never
+// starts, queues or ends a turn of the adapter's.
+func (s *session) steer(ctx context.Context, text string) (core.SteerOutcome, error) {
+	s.mu.Lock()
+	proc, running, acpID := s.proc, s.running, s.acpID
+	s.mu.Unlock()
+	if !running || proc == nil {
+		return core.SteerIdle, nil
+	}
+	if !proc.init.canSteer() {
+		return core.SteerUnsupported, nil
+	}
+	req := acpSteeringRequest{SessionID: acpID, Prompt: []acpContentBlock{{Type: "text", Text: text}}}
+	req.Meta.Steering.IdleBehavior = "promptRequired"
+	var resp acpSteeringResponse
+	if err := proc.call(ctx, methodSessionSteering, req, &resp); err != nil {
+		var rerr *rpcError
+		if errors.As(err, &rerr) {
+			return core.SteerUnsupported, nil // the agent refused (or does not know the method)
+		}
+		return "", err
+	}
+	switch resp.Outcome {
+	case "injected":
+		return core.SteerInjected, nil
+	case "promptRequired":
+		return core.SteerIdle, nil
+	case "startedNewTurn":
+		// The turn ended between the check and the call, and an agent without the
+		// opt-in started one of its own: stop it, the caller sends the message
+		// as an ordinary input.
+		_ = proc.conn.Notify(methodSessionCancel, acpCancelNotification{SessionID: acpID})
+		return core.SteerIdle, nil
+	}
+	return core.SteerUnsupported, nil
+}
+
 func (s *session) close() {
 	s.mu.Lock()
 	s.closed = true

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -924,5 +925,59 @@ func TestTurnMetricsReportContextOnlyWhenBothNumbersCame(t *testing.T) {
 	m := s.turnMetrics(acpPromptResponse{})
 	if m["contextTokens"] != int64(5000) || m["contextWindow"] != int64(20000) {
 		t.Fatalf("metrics = %v", m)
+	}
+}
+
+// A steer joins the running turn of an agent that takes it; with no turn
+// running it consumes nothing, and an agent that does not advertise steering
+// or refuses it is "unsupported" (the caller queues).
+func TestSteerJoinsTheRunningTurn(t *testing.T) {
+	h := newHarness(t, Config{Agents: []AgentConfig{
+		fakeAgentConfig(t, "fake", map[string]string{"ACP_FAKE_STEER": "1"}),
+		fakeAgentConfig(t, "plain", nil),
+		fakeAgentConfig(t, "refuses", map[string]string{"ACP_FAKE_STEER": "refuse"}),
+	}})
+	steer := func(name, prompt string, turn bool) (core.SteerOutcome, string, string) {
+		ws, _ := h.workspace()
+		sid := h.session(ws, name, prompt, core.SessionOptions{})
+		if turn {
+			time.Sleep(150 * time.Millisecond)
+		} else {
+			h.settle(ws, sid)
+		}
+		out, err := h.client.Steer(h.ctx(), h.ep, ws, sid, "use blue instead")
+		if err != nil {
+			t.Fatalf("%s: Steer: %v", name, err)
+		}
+		_ = h.client.Interrupt(h.ctx(), h.ep, ws, sid)
+		h.settle(ws, sid)
+		return out, strings.Join(texts(h.messages(ws, sid, 0)), "|"), sid
+	}
+	if out, msgs, _ := steer("fake", "steps", true); out != core.SteerInjected || !strings.Contains(msgs, "steered: use blue instead") {
+		t.Fatalf("running turn: outcome %q, messages %q", out, msgs)
+	}
+	if out, msgs, _ := steer("fake", "two", false); out != core.SteerIdle || strings.Contains(msgs, "steered") {
+		t.Fatalf("idle session: outcome %q, messages %q", out, msgs)
+	}
+	if out, _, _ := steer("plain", "steps", true); out != core.SteerUnsupported {
+		t.Fatalf("agent without steering: outcome %q", out)
+	}
+	if out, _, _ := steer("refuses", "steps", true); out != core.SteerUnsupported {
+		t.Fatalf("agent that refuses: outcome %q", out)
+	}
+	ws, _ := h.workspace()
+	if _, err := h.client.Steer(h.ctx(), h.ep, ws, "nope", "x"); err == nil {
+		t.Fatal("a steer to no session must fail")
+	}
+}
+
+func TestSteerIsAdvertised(t *testing.T) {
+	h := newHarness(t, Config{Agents: []AgentConfig{fakeAgentConfig(t, "fake", nil)}})
+	d, err := h.client.Discovery(h.ctx(), h.ep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(d.Capabilities, protocol.CapabilitySteer) {
+		t.Fatalf("capabilities = %v", d.Capabilities)
 	}
 }

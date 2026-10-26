@@ -78,6 +78,7 @@ func (a *adapter) handler() http.Handler {
 	mux.HandleFunc("GET /core/v1/workspaces/{ws}/sessions/{sid}/turn", a.pollTurn)
 	mux.HandleFunc("GET /core/v1/workspaces/{ws}/sessions/{sid}/messages", a.messages)
 	mux.HandleFunc("POST /core/v1/workspaces/{ws}/sessions/{sid}/interrupt", a.interrupt)
+	mux.HandleFunc("POST /core/v1/workspaces/{ws}/sessions/{sid}/steer", a.steer)
 	mux.HandleFunc("GET /core/v1/workspaces/{ws}/sessions/{sid}/files", a.listFiles)
 	mux.HandleFunc("GET /acp/v1/agents", a.agents)
 	mux.HandleFunc("GET /version", serveVersion)
@@ -385,6 +386,33 @@ func (a *adapter) interrupt(w http.ResponseWriter, r *http.Request) {
 	}
 	s.interrupt()
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// steer folds a message into the running turn when the session's agent can take
+// it (capability steer): the answer says whether it did.
+func (a *adapter) steer(w http.ResponseWriter, r *http.Request) {
+	s, aerr := a.session(r)
+	if aerr != nil {
+		writeErr(w, aerr)
+		return
+	}
+	var req protocol.SteerRequest
+	if err := decodeBody(r, &req); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if strings.TrimSpace(req.Text) == "" {
+		writeErr(w, errf(http.StatusBadRequest, protocol.ErrorBadRequest, "a steer needs text"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	outcome, err := s.steer(ctx, req.Text)
+	if err != nil {
+		writeErr(w, errf(http.StatusBadGateway, protocol.ErrorCoreUnavailable, "the agent did not answer the steer"))
+		return
+	}
+	writeJSON(w, http.StatusOK, protocol.SteerResponse{Outcome: string(outcome)})
 }
 
 func (a *adapter) listFiles(w http.ResponseWriter, r *http.Request) {

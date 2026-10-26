@@ -112,12 +112,13 @@ func sandboxHere() bool { return runtime.GOOS == "darwin" || runtime.GOOS == "li
 // serverCapabilities are the optional Core Protocol capabilities served:
 // agentProfile is mapped per agent (profile.go), sandboxExec is advertised
 // where the helper can confine and answered per agent (an agent without a
-// routing is refused).
+// routing is refused). steer is answered per agent: one that does not
+// advertise `_meta.steering.supported` gets "unsupported" and its messages queue.
 func serverCapabilities() []string {
 	caps := []string{
 		protocol.CapabilityInterrupt, protocol.CapabilityWriteFile, protocol.CapabilityDeleteWorkspace,
 		protocol.CapabilitySessionFiles, protocol.CapabilitySessionFileBytes, protocol.CapabilityAgentProfile,
-		capabilityTurnActivity,
+		capabilityTurnActivity, protocol.CapabilitySteer,
 	}
 	if sandboxHere() {
 		caps = append(caps, protocol.CapabilitySandboxExec)

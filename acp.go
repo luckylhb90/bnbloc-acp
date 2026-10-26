@@ -23,6 +23,9 @@ const (
 	methodSessionCancel   = "session/cancel"
 	methodSessionSetMode  = "session/set_mode"
 	methodSessionSetValue = "session/set_config_option"
+	// methodSessionSteering is the steering extension (sent only to an agent
+	// that advertised it).
+	methodSessionSteering = "_session/steering"
 )
 
 // Client methods (agent → client).
@@ -91,7 +94,17 @@ type acpInitializeResponse struct {
 		} `json:"sessionCapabilities"`
 	} `json:"agentCapabilities"`
 	AgentInfo *acpImplementation `json:"agentInfo"`
+	// Meta carries the steering extension's advertisement (_meta.steering).
+	Meta struct {
+		Steering struct {
+			Supported bool `json:"supported"`
+		} `json:"steering"`
+	} `json:"_meta"`
 }
+
+// canSteer: the agent takes `_session/steering` (a message folded into its
+// running turn; agentclientprotocol/agent-client-protocol#1261).
+func (r acpInitializeResponse) canSteer() bool { return r.Meta.Steering.Supported }
 
 // canResume: the agent supports session/resume (continue without replay).
 func (r acpInitializeResponse) canResume() bool {
@@ -202,6 +215,25 @@ type acpContentBlock struct {
 type acpPromptRequest struct {
 	SessionID string            `json:"sessionId"`
 	Prompt    []acpContentBlock `json:"prompt"`
+}
+
+// acpSteeringRequest is `_session/steering`: the prompt shape, and the opt-in
+// that an idle agent hands the message back instead of starting a turn.
+type acpSteeringRequest struct {
+	SessionID string            `json:"sessionId"`
+	Prompt    []acpContentBlock `json:"prompt"`
+	Meta      struct {
+		Steering struct {
+			IdleBehavior string `json:"idleBehavior"`
+		} `json:"steering"`
+	} `json:"_meta"`
+}
+
+// acpSteeringResponse: injected (joined the running turn), promptRequired (no
+// turn runs; the message was not consumed) or startedNewTurn (an agent without
+// the opt-in started a turn of its own).
+type acpSteeringResponse struct {
+	Outcome string `json:"outcome"`
 }
 
 type acpPromptResponse struct {

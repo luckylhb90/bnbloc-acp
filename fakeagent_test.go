@@ -23,6 +23,9 @@ import (
 //	ACP_FAKE_NO_MODELS=1  no config options
 //	ACP_FAKE_DIE=1      print to stderr and exit before answering anything
 //	ACP_FAKE_MCP_HTTP=1 mcpCapabilities.http (and .sse)
+//	ACP_FAKE_STEER=1    _meta.steering.supported, and _session/steering
+//	                    (injected into a running turn, else promptRequired)
+//	ACP_FAKE_STEER=refuse  advertises it and answers it with an error
 //
 // Tests run with a stub MCP server command, mcp-tools, installed on PATH
 // (the profile fixtures' stdio server); mcp-missing is never installed.
@@ -199,7 +202,26 @@ func (f *fakeAgent) request(id json.RawMessage, method string, params json.RawMe
 		if os.Getenv("ACP_FAKE_RESUME") == "1" {
 			caps["sessionCapabilities"] = map[string]any{"resume": map[string]any{}}
 		}
-		f.reply(id, map[string]any{"protocolVersion": 1, "agentCapabilities": caps, "authMethods": []any{}})
+		res := map[string]any{"protocolVersion": 1, "agentCapabilities": caps, "authMethods": []any{}}
+		if os.Getenv("ACP_FAKE_STEER") != "" {
+			res["_meta"] = map[string]any{"steering": map[string]any{"supported": true, "idleBehaviors": []string{"promptRequired"}}}
+		}
+		f.reply(id, res)
+	case "_session/steering":
+		f.mu.Lock()
+		running := f.cancel[f.session] != nil
+		f.mu.Unlock()
+		switch {
+		case os.Getenv("ACP_FAKE_STEER") == "refuse":
+			f.fail(id, -32000, "steering is not possible now")
+		case !running:
+			f.reply(id, map[string]any{"outcome": "promptRequired", "reason": "noRunningTurn"})
+		default:
+			blocks, _ := p["prompt"].([]any)
+			text, _ := blocks[len(blocks)-1].(map[string]any)["text"].(string)
+			f.text("steered: "+text, "")
+			f.reply(id, map[string]any{"outcome": "injected"})
+		}
 	case "authenticate":
 		if p["methodId"] != "" && p["methodId"] == os.Getenv("ACP_FAKE_AUTH") {
 			f.mu.Lock()

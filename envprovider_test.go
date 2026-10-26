@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -59,7 +58,7 @@ func running(t *testing.T, started string) int {
 	n := 0
 	for _, f := range strings.Fields(string(raw)) {
 		pid, err := strconv.Atoi(f)
-		if err == nil && syscall.Kill(pid, 0) == nil {
+		if err == nil && processAlive(pid) {
 			n++
 		}
 	}

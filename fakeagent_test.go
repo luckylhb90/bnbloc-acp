@@ -21,6 +21,8 @@ import (
 //	ACP_FAKE_LOAD=1     loadSession (replays history on load)
 //	ACP_FAKE_AUTH=<id>  session/new fails with auth-required until authenticate(<id>)
 //	ACP_FAKE_NO_MODELS=1  no config options
+//	ACP_FAKE_LEGACY_MODELS=1  reports `models` (the earlier ACP model state) and
+//	                    takes session/set_model, with no model config option
 //	ACP_FAKE_DIE=1      print to stderr and exit before answering anything
 //	ACP_FAKE_MCP_HTTP=1 mcpCapabilities.http (and .sse)
 //	ACP_FAKE_STEER=1    _meta.steering.supported, and _session/steering
@@ -165,9 +167,24 @@ func (f *fakeAgent) call(method string, params any) json.RawMessage {
 	return <-ch
 }
 
+// legacyModels is the earlier model state (nil unless ACP_FAKE_LEGACY_MODELS=1);
+// the caller holds f.mu. The ids are provider:model pairs, as an agent that
+// serves several providers names them.
+func (f *fakeAgent) legacyModels() any {
+	if os.Getenv("ACP_FAKE_LEGACY_MODELS") != "1" {
+		return nil
+	}
+	cur := f.model
+	if cur != "prov-a:m-1" && cur != "prov-b:m-2" {
+		cur = "prov-a:m-1"
+	}
+	return map[string]any{"currentModelId": cur, "availableModels": []map[string]any{
+		{"modelId": "prov-a:m-1", "name": "m-1"}, {"modelId": "prov-b:m-2", "name": "m-2"}}}
+}
+
 // configOptions is the option list; the caller holds f.mu.
 func (f *fakeAgent) configOptions() any {
-	if os.Getenv("ACP_FAKE_NO_MODELS") == "1" {
+	if os.Getenv("ACP_FAKE_NO_MODELS") == "1" || os.Getenv("ACP_FAKE_LEGACY_MODELS") == "1" {
 		return nil
 	}
 	return []map[string]any{
@@ -240,7 +257,7 @@ func (f *fakeAgent) request(id json.RawMessage, method string, params json.RawMe
 		}
 		f.sessions++
 		f.session = fmt.Sprintf("acp-%d-%d", os.Getpid(), f.sessions)
-		result := map[string]any{"sessionId": f.session, "configOptions": f.configOptions(),
+		result := map[string]any{"sessionId": f.session, "configOptions": f.configOptions(), "models": f.legacyModels(),
 			"modes": map[string]any{"currentModeId": f.mode, "availableModes": []map[string]any{{"id": "default", "name": "Default"}, {"id": "accept", "name": "Accept"}}}}
 		f.mu.Unlock()
 		f.reply(id, result)
@@ -256,6 +273,17 @@ func (f *fakeAgent) request(id json.RawMessage, method string, params json.RawMe
 		result := map[string]any{"configOptions": f.configOptions()}
 		f.mu.Unlock()
 		f.reply(id, result)
+	case "session/set_model":
+		v, _ := p["modelId"].(string)
+		f.mu.Lock()
+		if os.Getenv("ACP_FAKE_LEGACY_MODELS") != "1" || (v != "prov-a:m-1" && v != "prov-b:m-2") {
+			f.mu.Unlock()
+			f.fail(id, -32602, "unknown model "+v)
+			return
+		}
+		f.model = v
+		f.mu.Unlock()
+		f.reply(id, map[string]any{})
 	case "session/set_config_option":
 		v, _ := p["value"].(string)
 		f.mu.Lock()

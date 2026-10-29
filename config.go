@@ -47,9 +47,13 @@ type AgentConfig struct {
 	Mode string `json:"mode,omitempty"`
 	// McpServers is passed to every session verbatim (an ACP McpServer list).
 	McpServers json.RawMessage `json:"mcpServers,omitempty"`
-	// Models / ModelArgs apply only when the agent reports no model selector:
-	// the catalog to offer, and spawn args with {model} replaced by the
-	// chosen model.
+	// Models / ModelArgs: the catalog to offer. With ModelArgs, for an agent that
+	// reports no model selector: spawn args with {model} replaced by the chosen
+	// model. Without ModelArgs, for an agent that reports a selector but only its
+	// current model (Hermes: its session answer lists the model in force, and it
+	// switches to any of its configured ones): the models it can be switched to,
+	// each applied through the agent's own switch (session/set_config_option, or
+	// session/set_model for an agent that reports the earlier model state).
 	Models    []string `json:"models,omitempty"`
 	ModelArgs []string `json:"modelArgs,omitempty"`
 	// EnvProvider is a program run for the agent on the host, never confined,
@@ -162,8 +166,8 @@ func (c *Config) validate() error {
 		if strings.TrimSpace(a.Command) == "" {
 			return fmt.Errorf("agent %q: command is required", a.Name)
 		}
-		if (len(a.Models) == 0) != (len(a.ModelArgs) == 0) {
-			return fmt.Errorf("agent %q: models and modelArgs go together (modelArgs applies the chosen model)", a.Name)
+		if len(a.ModelArgs) > 0 && len(a.Models) == 0 {
+			return fmt.Errorf("agent %q: modelArgs apply a model chosen from models: list them", a.Name)
 		}
 		if len(a.ModelArgs) > 0 && !strings.Contains(strings.Join(a.ModelArgs, "\x00"), "{model}") {
 			return fmt.Errorf("agent %q: modelArgs must contain {model}", a.Name)

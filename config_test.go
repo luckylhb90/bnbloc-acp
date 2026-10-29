@@ -13,7 +13,7 @@ func TestParseConfigValidates(t *testing.T) {
 		`{"agents":[{"name":"Bad Name","command":"x"}]}`:                                 "lowercase",
 		`{"agents":[{"name":"a","command":"x"},{"name":"a","command":"y"}]}`:             "duplicate",
 		`{"agents":[{"name":"a"}]}`:                                                      "command is required",
-		`{"agents":[{"name":"a","command":"x","models":["m"]}]}`:                         "go together",
+		`{"agents":[{"name":"a","command":"x","modelArgs":["--model","{model}"]}]}`:      "list them",
 		`{"agents":[{"name":"a","command":"x","models":["m"],"modelArgs":["--model"]}]}`: "{model}",
 		`{"agents":[{"name":"a","command":"x","permissions":{"allow":["shell"]}}]}`:      "not an ACP tool kind",
 		`{"agents":[{"name":"a","command":"x","mcpServers":{}}]}`:                        "JSON array",

@@ -224,7 +224,7 @@ func (r *registry) probe(ctx context.Context, a AgentConfig) agentStatus {
 	}
 	st.Available = true
 	st.MCPTransports = mcpTransports(proc.init)
-	applyCatalog(&st, resp.ConfigOptions)
+	applyCatalog(&st, resp.normalizeOptions())
 	return st
 }
 
@@ -255,7 +255,7 @@ func (r *registry) observe(name string, init acpInitializeResponse, opts []acpCo
 // usesConfigModels: the agent reports no model selector (or was not probed
 // yet) and its config declares a catalog applied through modelArgs.
 func (r *registry) usesConfigModels(a AgentConfig) bool {
-	if len(a.Models) == 0 {
+	if len(a.Models) == 0 || len(a.ModelArgs) == 0 {
 		return false
 	}
 	r.mu.Lock()
@@ -292,9 +292,10 @@ func (r *registry) targets() []protocol.Target {
 			continue
 		}
 		t := protocol.Target{ID: a.Name, Provider: a.Name, ReasoningEfforts: st.ReasoningEfforts, DefaultReasoning: st.DefaultReasoning, MCPTransports: st.MCPTransports, RequiresSandbox: a.guestOnly()}
-		if st.ModelSelector {
-			t.Models, t.DefaultModel = st.Models, st.DefaultModel
-		} else if len(a.Models) > 0 {
+		switch {
+		case st.ModelSelector:
+			t.Models, t.DefaultModel = withDeclared(st.Models, a.Models, len(a.ModelArgs) == 0), st.DefaultModel
+		case len(a.Models) > 0:
 			t.Models = a.Models
 		}
 		out = append(out, t)
@@ -317,3 +318,27 @@ func (probeHandler) Request(_ context.Context, method string, _ json.RawMessage)
 
 // probeDirFor is the scratch directory probes run in.
 func probeDirFor(home string) string { return filepath.Join(home, "probe") }
+
+// withDeclared is the models a target offers when the config declares models for an
+// agent that reports a selector: the agent's own list followed by the declared ones
+// it does not have, in the config's order (an agent that reports only the model in
+// force, and switches to its configured ones). Declared models count only when the
+// config has no modelArgs: with modelArgs they apply at spawn, for an agent with no
+// selector.
+func withDeclared(reported, declared []string, supplement bool) []string {
+	if !supplement || len(declared) == 0 {
+		return reported
+	}
+	out := append([]string(nil), reported...)
+	have := make(map[string]bool, len(out))
+	for _, m := range out {
+		have[m] = true
+	}
+	for _, m := range declared {
+		if !have[m] {
+			out = append(out, m)
+			have[m] = true
+		}
+	}
+	return out
+}

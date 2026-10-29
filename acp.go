@@ -14,14 +14,18 @@ const acpProtocolVersion = 1
 
 // Agent methods (client → agent).
 const (
-	methodInitialize      = "initialize"
-	methodAuthenticate    = "authenticate"
-	methodSessionNew      = "session/new"
-	methodSessionLoad     = "session/load"
-	methodSessionResume   = "session/resume"
-	methodSessionPrompt   = "session/prompt"
-	methodSessionCancel   = "session/cancel"
-	methodSessionSetMode  = "session/set_mode"
+	methodInitialize     = "initialize"
+	methodAuthenticate   = "authenticate"
+	methodSessionNew     = "session/new"
+	methodSessionLoad    = "session/load"
+	methodSessionResume  = "session/resume"
+	methodSessionPrompt  = "session/prompt"
+	methodSessionCancel  = "session/cancel"
+	methodSessionSetMode = "session/set_mode"
+	// methodSessionSetModel is the model switch of the earlier ACP model state
+	// (`models` in the session answer): used for an agent that reports its models
+	// that way and has no model config option.
+	methodSessionSetModel = "session/set_model"
 	methodSessionSetValue = "session/set_config_option"
 	// methodSessionSteering is the steering extension (sent only to an agent
 	// that advertised it).
@@ -143,6 +147,48 @@ type acpSessionResponse struct {
 	SessionID     string            `json:"sessionId"`
 	Modes         *acpModeState     `json:"modes"`
 	ConfigOptions []acpConfigOption `json:"configOptions"`
+	// Models is the earlier ACP model state: the models an agent offers and the
+	// current one. The ACP schema has both this and the model config option; an
+	// agent may report either. normalizeOptions turns it into the option.
+	Models *acpModelState `json:"models"`
+}
+
+// acpModelState is the earlier ACP session model state.
+type acpModelState struct {
+	CurrentModelID  string `json:"currentModelId"`
+	AvailableModels []struct {
+		ModelID string `json:"modelId"`
+		Name    string `json:"name"`
+	} `json:"availableModels"`
+}
+
+// legacyModelOptionID is the id of the config option made from an agent's earlier
+// model state; applying it goes to session/set_model (session.go setOption).
+const legacyModelOptionID = "model"
+
+// normalizeOptions is the config options of a session answer: the agent's own, and,
+// when it has no model option but reports the earlier model state, one made from
+// that state, so the rest of the core sees one shape. The option is marked
+// (`legacy`) so a value is applied with session/set_model, not set_config_option.
+func (r acpSessionResponse) normalizeOptions() []acpConfigOption {
+	if _, ok := findOption(r.ConfigOptions, configCategoryModel); ok || r.Models == nil || len(r.Models.AvailableModels) == 0 {
+		return r.ConfigOptions
+	}
+	values := make([]map[string]string, 0, len(r.Models.AvailableModels))
+	for _, m := range r.Models.AvailableModels {
+		if m.ModelID != "" {
+			values = append(values, map[string]string{"value": m.ModelID, "name": firstNonEmpty(m.Name, m.ModelID)})
+		}
+	}
+	if len(values) == 0 {
+		return r.ConfigOptions
+	}
+	opts, _ := json.Marshal(values)
+	cur, _ := json.Marshal(r.Models.CurrentModelID)
+	return append(append([]acpConfigOption(nil), r.ConfigOptions...), acpConfigOption{
+		ID: legacyModelOptionID, Name: "Model", Category: configCategoryModel, Type: "select",
+		CurrentValue: cur, Options: opts, legacy: true,
+	})
 }
 
 // acpConfigOption is one session config option. Only "select" options carry
@@ -154,6 +200,8 @@ type acpConfigOption struct {
 	Type         string          `json:"type"`
 	CurrentValue json.RawMessage `json:"currentValue"`
 	Options      json.RawMessage `json:"options,omitempty"`
+	// legacy marks an option made from the earlier model state (never on the wire).
+	legacy bool
 }
 
 // values flattens a select option's (possibly grouped) value list.
@@ -200,6 +248,11 @@ type acpSetConfigOptionRequest struct {
 
 type acpSetConfigOptionResponse struct {
 	ConfigOptions []acpConfigOption `json:"configOptions"`
+}
+
+type acpSetModelRequest struct {
+	SessionID string `json:"sessionId"`
+	ModelID   string `json:"modelId"`
 }
 
 type acpSetModeRequest struct {

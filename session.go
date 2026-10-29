@@ -177,10 +177,10 @@ func (s *session) open(ctx context.Context, first turnInput) error {
 	s.mu.Lock()
 	s.proc, s.acpID, s.procPin = proc, resp.SessionID, pin
 	s.resumable, s.loadable = proc.init.canResume(), proc.init.AgentCapabilities.LoadSession
-	s.options = resp.ConfigOptions
+	s.options = resp.normalizeOptions()
 	s.mu.Unlock()
 	go s.watch(proc)
-	s.reg.observe(s.agent.Name, proc.init, resp.ConfigOptions)
+	s.reg.observe(s.agent.Name, proc.init, s.options)
 	if err := s.applyMode(hctx, proc, resp.Modes); err != nil {
 		s.close()
 		return fmt.Errorf("%w: %v", errSessionOption, err)
@@ -266,6 +266,22 @@ func findOption(opts []acpConfigOption, category string) (acpConfigOption, bool)
 }
 
 func (s *session) setOption(ctx context.Context, proc *agentProc, opt acpConfigOption, value string) error {
+	if opt.legacy {
+		// An agent that reports its models the earlier way switches them the earlier
+		// way. The option is remade with the new current value; the agent's answer
+		// carries nothing to read it from.
+		if err := proc.call(ctx, methodSessionSetModel, acpSetModelRequest{SessionID: s.acpID, ModelID: value}, nil); err != nil {
+			return fmt.Errorf("set model to %q: %w", value, err)
+		}
+		s.mu.Lock()
+		for i := range s.options {
+			if s.options[i].legacy {
+				s.options[i].CurrentValue, _ = json.Marshal(value)
+			}
+		}
+		s.mu.Unlock()
+		return nil
+	}
 	var resp acpSetConfigOptionResponse
 	if err := proc.call(ctx, methodSessionSetValue, acpSetConfigOptionRequest{SessionID: s.acpID, ConfigID: opt.ID, Value: value}, &resp); err != nil {
 		return fmt.Errorf("set %s to %q: %w", opt.ID, value, err)
@@ -558,8 +574,8 @@ func (s *session) ensureProc() (*agentProc, error) {
 	}
 	s.mu.Lock()
 	s.proc, s.procPin = proc, pin
-	if len(resp.ConfigOptions) > 0 {
-		s.options = resp.ConfigOptions
+	if opts := resp.normalizeOptions(); len(opts) > 0 {
+		s.options = opts
 	}
 	s.mu.Unlock()
 	go s.watch(proc)

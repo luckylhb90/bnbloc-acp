@@ -463,6 +463,94 @@ func TestModelReasoningAndModeAreApplied(t *testing.T) {
 	}
 }
 
+// An agent that reports its models the earlier ACP way (`models` in the session
+// answer, session/set_model to switch) is offered and switched like one with a model
+// option: its models are the target's, the sender's choice reaches it, a model it
+// does not offer is refused, and a conversation continued in a new process keeps the
+// model chosen.
+func TestAnAgentThatReportsModelsTheEarlierWayIsSwitchedWithSetModel(t *testing.T) {
+	a := fakeAgentConfig(t, "early", map[string]string{"ACP_FAKE_LEGACY_MODELS": "1", "ACP_FAKE_RESUME": "1"})
+	h := newHarness(t, Config{Agents: []AgentConfig{a}})
+	ws, _ := h.workspace()
+	sid := h.session(ws, "early", "whoami", core.SessionOptions{})
+	h.settle(ws, sid)
+	targets, err := h.client.ListTargets(h.ctx(), h.ep)
+	if err != nil || len(targets) != 1 || strings.Join(targets[0].Models, ",") != "prov-a:m-1,prov-b:m-2" || targets[0].DefaultModel != "prov-a:m-1" {
+		t.Fatalf("targets = %+v, %v (the agent's models are the target's)", targets, err)
+	}
+	if got := h.lastText(ws, sid); !strings.Contains(got, "model=") {
+		t.Fatalf("whoami = %q", got)
+	}
+	h.send(ws, sid, "whoami", core.SessionOptions{Model: "prov-b:m-2"})
+	h.settle(ws, sid)
+	if got := h.lastText(ws, sid); !strings.Contains(got, "model=prov-b:m-2") {
+		t.Fatalf("after the switch the agent runs %q", got)
+	}
+	msgs := h.messages(ws, sid, 0)
+	if msgs[len(msgs)-1].Metrics["model"] != "prov-b:m-2" {
+		t.Fatalf("metrics = %+v: the model in force is the one chosen", msgs[len(msgs)-1].Metrics)
+	}
+	// The same choice again sends nothing: the option already holds it.
+	h.send(ws, sid, "whoami", core.SessionOptions{Model: "prov-b:m-2"})
+	h.settle(ws, sid)
+	if got := h.lastText(ws, sid); !strings.Contains(got, "model=prov-b:m-2") {
+		t.Fatalf("a repeated choice: %q", got)
+	}
+	// A model the agent does not offer is a bad request, as for a model option.
+	_, err = h.client.CreateSession(h.ctx(), h.ep, core.SessionRequest{WorkspaceID: ws, TargetID: "early", Prompt: "hi", Options: core.SessionOptions{Model: "prov-z:nope"}})
+	var perr *protocol.ProtocolError
+	if !errors.As(err, &perr) || perr.Code != protocol.ErrorBadRequest {
+		t.Fatalf("CreateSession(a model it does not offer) = %v, want bad_request", err)
+	}
+}
+
+// An agent that reports only its current model (the earlier model state with one
+// entry) and is configured with the models it can be switched to: the target offers
+// the declared ones too, and a choice among them reaches the agent's own switch.
+func TestDeclaredModelsSupplementWhatTheAgentReports(t *testing.T) {
+	a := fakeAgentConfig(t, "early", map[string]string{"ACP_FAKE_LEGACY_MODELS": "1"})
+	a.Models = []string{"prov-b:m-2", "prov-extra:m-9"}
+	h := newHarness(t, Config{Agents: []AgentConfig{a}})
+	ws, _ := h.workspace()
+	sid := h.session(ws, "early", "whoami", core.SessionOptions{})
+	h.settle(ws, sid)
+	targets, err := h.client.ListTargets(h.ctx(), h.ep)
+	if err != nil || len(targets) != 1 {
+		t.Fatalf("targets = %+v, %v", targets, err)
+	}
+	// the agent's two, then the declared one it did not report; none twice
+	if got := strings.Join(targets[0].Models, ","); got != "prov-a:m-1,prov-b:m-2,prov-extra:m-9" {
+		t.Fatalf("models = %q", got)
+	}
+	// Declared models with modelArgs keep their old meaning (for an agent with no selector).
+	if _, err := ParseConfig([]byte(`{"agents":[{"name":"x","command":"c","modelArgs":["--m","{model}"]}]}`)); err == nil {
+		t.Error("modelArgs with no models was accepted")
+	}
+	if _, err := ParseConfig([]byte(`{"agents":[{"name":"x","command":"c","models":["a"]}]}`)); err != nil {
+		t.Errorf("models alone (the agent applies them itself): %v", err)
+	}
+}
+
+// An agent with a model option keeps it: the earlier state is read only when the
+// option is absent.
+func TestTheModelOptionWinsOverTheEarlierModelState(t *testing.T) {
+	resp := acpSessionResponse{
+		ConfigOptions: []acpConfigOption{{ID: "model", Category: "model", Type: "select", CurrentValue: []byte(`"x"`), Options: []byte(`[{"value":"x"}]`)}},
+		Models:        &acpModelState{CurrentModelID: "y"},
+	}
+	resp.Models.AvailableModels = append(resp.Models.AvailableModels, struct {
+		ModelID string `json:"modelId"`
+		Name    string `json:"name"`
+	}{ModelID: "y"})
+	opts := resp.normalizeOptions()
+	if len(opts) != 1 || opts[0].legacy || opts[0].current() != "x" {
+		t.Fatalf("options = %+v", opts)
+	}
+	if got := (acpSessionResponse{}).normalizeOptions(); len(got) != 0 {
+		t.Fatalf("no options, no models: %+v", got)
+	}
+}
+
 func TestConfigDeclaredModelsApplyThroughModelArgs(t *testing.T) {
 	a := fakeAgentConfig(t, "plain", map[string]string{"ACP_FAKE_NO_MODELS": "1"})
 	a.Models, a.ModelArgs = []string{"m1", "m2"}, []string{"--model", "{model}"}

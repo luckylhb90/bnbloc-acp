@@ -55,9 +55,24 @@ Each agent uses its own sign-in (log in to Claude Code, Codex, … as usual).
 | `cleanEnv` | `true`: a sandboxed run does not inherit the credentials in the core's own environment (below). Default `false`. |
 | `stderrActivity` | Log lines that mark a step of the running turn (below). |
 | `sandbox` | Optional: overrides the sandbox routing recognised from the command (`"opencode"`, `"claude"`, `"codex"`) or turns it off (`"off"`) (below). |
-| `models`, `modelArgs` | A model catalog and the spawn args applying it, only for an agent that reports no model selector. |
+| `models`, `modelArgs` | A model catalog. With `modelArgs` (spawn args, `{model}` replaced by the choice): for an agent that reports no model selector. Without: models an agent that reports only its current one can be switched to, added to what it reports (below). |
 | `permissions.allow` | Tool kinds the adapter approves (below). |
 | `idleTimeout` | Stop an idle session's process after this long (it resumes on the next message). |
+
+### Agents that report their models the earlier ACP way
+
+The ACP schema has two ways for an agent to report its models: a `model` config
+option (`configOptions` in the session answer, switched with `session/set_config_option`)
+and the earlier model state (`models` with `availableModels` and `currentModelId`,
+switched with `session/set_model`). The core reads either: an agent with no model
+option but a `models` state gets one made from it, and a model chosen in a room reaches
+it through the call that agent understands. An agent with a model option keeps it.
+
+Some agents report only the model in force and switch to any model of their own
+configuration (Hermes, with one provider per wire protocol). `models` without
+`modelArgs` lists those: the target offers what the agent reports, then the declared
+models it did not, and a choice is applied through the agent's own switch. The agent
+refuses a model it does not know, and the room is told.
 
 ### Agents that exist only in the sandbox
 

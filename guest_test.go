@@ -172,7 +172,6 @@ func TestGuestAgentConfigRefusesWhatItCannotDeliver(t *testing.T) {
 	for name, body := range map[string]string{
 		"env":         `{"agents":[{"name":"g","command":"x","sandbox":"guest","env":{"K":"v"}}]}`,
 		"envProvider": `{"agents":[{"name":"g","command":"x","sandbox":"guest","envProvider":{"command":"p"}}]}`,
-		"models":      `{"agents":[{"name":"g","command":"x","sandbox":"guest","models":["m"],"modelArgs":["--m","{model}"]}]}`,
 	} {
 		if _, err := ParseConfig([]byte(body)); err == nil || !strings.Contains(err.Error(), "guest") {
 			t.Errorf("%s: %v", name, err)
@@ -180,5 +179,14 @@ func TestGuestAgentConfigRefusesWhatItCannotDeliver(t *testing.T) {
 	}
 	if _, err := ParseConfig([]byte(`{"agents":[{"name":"g","command":"$HOME/a/b acp","sandbox":"guest"}]}`)); err != nil {
 		t.Errorf("a plain guest agent: %v", err)
+	}
+	// models and modelArgs work as for a host agent: the chosen model is added to the
+	// command line the guest runs.
+	c, err := ParseConfig([]byte(`{"agents":[{"name":"g","command":"$HOME/a/b","args":["--acp"],"sandbox":"guest","models":["m1","m2"],"modelArgs":["--model","{model}"]}]}`))
+	if err != nil {
+		t.Fatalf("a guest agent with modelArgs: %v", err)
+	}
+	if got := strings.Join(c.Agents[0].spawnArgs("m2"), " "); got != "--acp --model m2" {
+		t.Errorf("a guest agent's launch args = %q", got)
 	}
 }

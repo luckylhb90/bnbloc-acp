@@ -90,11 +90,12 @@ shell line: `$HOME/agents/x/node_modules/.bin/x` works), run through
   being probed there (its models appear after its first session). Its target
   carries `requiresSandbox: true`, which makes the bridge run it sandboxed or not
   at all and never lend it to anyone else (its sign-in exists only for its owner).
-- It takes no `env`, `envProvider` or `modelArgs` (its environment is the
-  guest's own: what a space needs comes from the bridge's local egress
-  providers). `models` lists models the agent switches to that it does not
-  report, as for a host agent. A conversation survives the idle stop and an
-  update as any other.
+- It takes no `env` or `envProvider` (its environment is the guest's own: what a
+  space needs comes from the bridge's local egress providers). `models` and
+  `modelArgs` work as for a host agent: `models` lists models the agent switches
+  to that it does not report, and `modelArgs` are added to the command line at the
+  start of a session with a chosen model. A conversation survives the idle stop and
+  an update as any other.
 - Its files are in the guest, so `in-use.json` lists its guest paths and the
   "program is gone" fallback below does not apply to it.
 - Design: bnbloc `docs/prd/2026-10-26-sandbox-only-agents-design.md`.

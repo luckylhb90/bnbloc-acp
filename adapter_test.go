@@ -531,9 +531,9 @@ func TestDeclaredModelsSupplementWhatTheAgentReports(t *testing.T) {
 	}
 }
 
-// A guest agent (it exists only in the sandbox) may list models it switches to: its
-// target offers them before any live session reported its own, and still takes no
-// environment, env provider or modelArgs.
+// A guest agent (it exists only in the sandbox) may list models it switches to, and apply
+// a chosen one through modelArgs on its command line: its target offers them before any
+// live session reported its own. It still takes no environment or env provider.
 func TestAGuestAgentMayListModels(t *testing.T) {
 	cfg, err := ParseConfig([]byte(`{"agents":[{"name":"g","command":"$HOME/g","sandbox":"guest","models":["p:a","p:b"]}]}`))
 	if err != nil {
@@ -544,10 +544,12 @@ func TestAGuestAgentMayListModels(t *testing.T) {
 	if len(targets) != 1 || !targets[0].RequiresSandbox || strings.Join(targets[0].Models, ",") != "p:a,p:b" {
 		t.Fatalf("targets = %+v", targets)
 	}
+	if _, err := ParseConfig([]byte(`{"agents":[{"name":"g","command":"c","sandbox":"guest","models":["a"],"modelArgs":["--m","{model}"]}]}`)); err != nil {
+		t.Errorf("modelArgs on a guest agent: %v", err)
+	}
 	for _, bad := range []string{
 		`{"agents":[{"name":"g","command":"c","sandbox":"guest","env":{"A":"b"}}]}`,
 		`{"agents":[{"name":"g","command":"c","sandbox":"guest","envProvider":{"command":"x"}}]}`,
-		`{"agents":[{"name":"g","command":"c","sandbox":"guest","models":["a"],"modelArgs":["--m","{model}"]}]}`,
 	} {
 		if _, err := ParseConfig([]byte(bad)); err == nil {
 			t.Errorf("accepted %s", bad)

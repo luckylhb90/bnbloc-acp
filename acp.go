@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 )
 
 // ACP wire types: the subset of the Agent Client Protocol v1 schema
@@ -206,29 +207,51 @@ type acpConfigOption struct {
 
 // values flattens a select option's (possibly grouped) value list.
 func (o acpConfigOption) values() []string {
+	vals, _ := o.valuesAndNames()
+	return vals
+}
+
+// valuesAndNames is values and, for the entries that carry one, the display name the agent
+// gives each value. An entry whose name is empty, or only repeats the value, has no name here:
+// a name that says nothing more than the id adds nothing a client would not show anyway.
+func (o acpConfigOption) valuesAndNames() ([]string, map[string]string) {
 	if o.Type != "select" || len(o.Options) == 0 {
-		return nil
+		return nil, nil
+	}
+	type entry struct {
+		Value *string `json:"value"`
+		Name  string  `json:"name"`
 	}
 	var entries []struct {
-		Value   *string `json:"value"`
-		Options []struct {
-			Value string `json:"value"`
-		} `json:"options"`
+		entry
+		Options []entry `json:"options"`
 	}
 	if json.Unmarshal(o.Options, &entries) != nil {
-		return nil
+		return nil, nil
 	}
 	var out []string
+	var names map[string]string
+	add := func(e entry) {
+		out = append(out, *e.Value)
+		if n := strings.TrimSpace(e.Name); n != "" && n != *e.Value {
+			if names == nil {
+				names = map[string]string{}
+			}
+			names[*e.Value] = n
+		}
+	}
 	for _, e := range entries {
 		if e.Value != nil {
-			out = append(out, *e.Value)
+			add(e.entry)
 			continue
 		}
 		for _, v := range e.Options {
-			out = append(out, v.Value)
+			if v.Value != nil {
+				add(v)
+			}
 		}
 	}
-	return out
+	return out, names
 }
 
 // current is a select option's current value ("" for other types).

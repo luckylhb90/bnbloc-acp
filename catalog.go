@@ -30,14 +30,17 @@ const (
 // agentStatus is one configured agent's availability and catalog, from its
 // last probe (or live session).
 type agentStatus struct {
-	Name             string   `json:"name"`
-	Available        bool     `json:"available"`
-	Reason           string   `json:"reason,omitempty"`
-	ModelSelector    bool     `json:"modelSelector"`
-	Models           []string `json:"models,omitempty"`
-	DefaultModel     string   `json:"defaultModel,omitempty"`
-	ReasoningEfforts []string `json:"reasoningEfforts,omitempty"`
-	DefaultReasoning string   `json:"defaultReasoning,omitempty"`
+	Name          string   `json:"name"`
+	Available     bool     `json:"available"`
+	Reason        string   `json:"reason,omitempty"`
+	ModelSelector bool     `json:"modelSelector"`
+	Models        []string `json:"models,omitempty"`
+	// ModelNames are the display names the agent gives its models, by value (only those
+	// that have one).
+	ModelNames       map[string]string `json:"modelNames,omitempty"`
+	DefaultModel     string            `json:"defaultModel,omitempty"`
+	ReasoningEfforts []string          `json:"reasoningEfforts,omitempty"`
+	DefaultReasoning string            `json:"defaultReasoning,omitempty"`
 	// MCPTransports are the MCP transports the agent accepts in a session
 	// (stdio always; http / sse per its initialize mcpCapabilities).
 	MCPTransports []string `json:"mcpTransports,omitempty"`
@@ -232,10 +235,11 @@ func (r *registry) probe(ctx context.Context, a AgentConfig) agentStatus {
 // select gives the models and the default, "thought_level" the reasoning
 // levels.
 func applyCatalog(st *agentStatus, opts []acpConfigOption) {
-	st.ModelSelector, st.Models, st.DefaultModel = false, nil, ""
+	st.ModelSelector, st.Models, st.ModelNames, st.DefaultModel = false, nil, nil, ""
 	st.ReasoningEfforts, st.DefaultReasoning = nil, ""
 	if o, ok := findOption(opts, configCategoryModel); ok {
-		st.ModelSelector, st.Models, st.DefaultModel = true, o.values(), o.current()
+		st.ModelSelector, st.DefaultModel = true, o.current()
+		st.Models, st.ModelNames = o.valuesAndNames()
 	}
 	if o, ok := findOption(opts, configCategoryThought); ok {
 		st.ReasoningEfforts, st.DefaultReasoning = o.values(), o.current()
@@ -298,6 +302,7 @@ func (r *registry) targets() []protocol.Target {
 		case len(a.Models) > 0:
 			t.Models = a.Models
 		}
+		t.ModelNames = namesFor(t.Models, st.ModelNames, a.ModelNames)
 		out = append(out, t)
 	}
 	return out
@@ -318,6 +323,26 @@ func (probeHandler) Request(_ context.Context, method string, _ json.RawMessage)
 
 // probeDirFor is the scratch directory probes run in.
 func probeDirFor(home string) string { return filepath.Join(home, "probe") }
+
+// namesFor is the display names a target carries: for each of its models, the name the agent
+// gave it, else the one the config declares; a model with neither has none. Names of models the
+// target does not offer are left out.
+func namesFor(models []string, reported, declared map[string]string) map[string]string {
+	var out map[string]string
+	for _, m := range models {
+		n := reported[m]
+		if n == "" {
+			n = declared[m]
+		}
+		if n != "" {
+			if out == nil {
+				out = map[string]string{}
+			}
+			out[m] = n
+		}
+	}
+	return out
+}
 
 // withDeclared is the models a target offers when the config declares models for an
 // agent that reports a selector: the agent's own list followed by the declared ones

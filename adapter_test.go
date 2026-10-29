@@ -1095,3 +1095,77 @@ func TestSteerIsAdvertised(t *testing.T) {
 		t.Fatalf("capabilities = %v", d.Capabilities)
 	}
 }
+
+// An agent gives each model a display name beside its value, and the core keeps it: the shapes
+// below are what real agents answered (a flat list, a grouped one, an entry whose name only
+// repeats its value or is blank, and the earlier model state).
+func TestTheNamesAnAgentGivesItsModelsAreKept(t *testing.T) {
+	flat := acpConfigOption{Category: "model", Type: "select", Options: []byte(`[
+		{"value":"anthropic/claude-haiku-4-5","name":"anthropic/Claude Haiku 4.5 (latest)"},
+		{"value":"litellm/plain","name":"litellm/plain"},
+		{"value":"blank","name":"  "},
+		{"value":"unnamed"}]`)}
+	vals, names := flat.valuesAndNames()
+	if strings.Join(vals, ",") != "anthropic/claude-haiku-4-5,litellm/plain,blank,unnamed" {
+		t.Fatalf("values = %v", vals)
+	}
+	if len(names) != 1 || names["anthropic/claude-haiku-4-5"] != "anthropic/Claude Haiku 4.5 (latest)" {
+		t.Errorf("names = %v: only a name that says more than the value is kept", names)
+	}
+
+	grouped := acpConfigOption{Category: "model", Type: "select", Options: []byte(`[
+		{"group":"g","name":"Group","options":[{"value":"g/a","name":"Model A"},{"value":"g/b","name":"Model B"}]},
+		{"value":"top","name":"Top"}]`)}
+	vals, names = grouped.valuesAndNames()
+	if strings.Join(vals, ",") != "g/a,g/b,top" || names["g/a"] != "Model A" || names["top"] != "Top" || names["g"] != "" {
+		t.Errorf("grouped: %v %v", vals, names)
+	}
+
+	// The earlier model state becomes an option whose names survive, and the catalog and the
+	// target carry them.
+	resp := acpSessionResponse{Models: &acpModelState{CurrentModelID: "p:a"}}
+	resp.Models.AvailableModels = append(resp.Models.AvailableModels,
+		struct {
+			ModelID string `json:"modelId"`
+			Name    string `json:"name"`
+		}{"p:a", "Provider A"},
+		struct {
+			ModelID string `json:"modelId"`
+			Name    string `json:"name"`
+		}{"p:b", ""})
+	var st agentStatus
+	applyCatalog(&st, resp.normalizeOptions())
+	if strings.Join(st.Models, ",") != "p:a,p:b" || st.ModelNames["p:a"] != "Provider A" || len(st.ModelNames) != 1 {
+		t.Errorf("legacy state: %v %v", st.Models, st.ModelNames)
+	}
+	r := &registry{cfg: &Config{Agents: []AgentConfig{{Name: "x", Command: "c"}}}, status: map[string]agentStatus{"x": {Name: "x", Available: true, ModelSelector: true, Models: st.Models, ModelNames: st.ModelNames}}}
+	tg := r.targets()
+	if len(tg) != 1 || tg[0].ModelNames["p:a"] != "Provider A" {
+		t.Errorf("the target does not carry the names: %+v", tg)
+	}
+	// A catalog read again forgets names an agent no longer gives.
+	applyCatalog(&st, nil)
+	if st.ModelNames != nil || st.Models != nil {
+		t.Errorf("a catalog with no model option keeps old names: %v", st.ModelNames)
+	}
+}
+
+// A declared model's name comes from the config (a sidecar's drop-in), the agent's own name wins
+// for a model it reports, and a name for a model the target does not offer is not sent.
+func TestDeclaredModelsCarryTheirNames(t *testing.T) {
+	cfg, err := ParseConfig([]byte(`{"agents":[{"name":"g","command":"c","sandbox":"guest","models":["p/a","p/b"],"modelNames":{"p/a":"Model A","p/zzz":"Not offered"}}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &registry{cfg: cfg, status: map[string]agentStatus{"g": {Name: "g", Available: true}}}
+	tg := r.targets()
+	if len(tg) != 1 || tg[0].ModelNames["p/a"] != "Model A" || len(tg[0].ModelNames) != 1 {
+		t.Fatalf("declared names = %+v", tg)
+	}
+	// once the agent reports its own list and names, those win and the declared remain for the rest
+	r.status["g"] = agentStatus{Name: "g", Available: true, ModelSelector: true, Models: []string{"p/a"}, ModelNames: map[string]string{"p/a": "From the agent"}}
+	tg = r.targets()
+	if tg[0].ModelNames["p/a"] != "From the agent" {
+		t.Errorf("the agent's own name must win: %v", tg[0].ModelNames)
+	}
+}

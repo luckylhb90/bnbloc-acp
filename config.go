@@ -56,6 +56,10 @@ type AgentConfig struct {
 	// session/set_model for an agent that reports the earlier model state).
 	Models    []string `json:"models,omitempty"`
 	ModelArgs []string `json:"modelArgs,omitempty"`
+	// ModelNames are display names for the models above, by value (only those that have
+	// one): what a room's picker shows for a declared model, as it shows the name an agent
+	// reports for its own. A name for a model that is not declared is ignored.
+	ModelNames map[string]string `json:"modelNames,omitempty"`
 	// EnvProvider is a program run for the agent on the host, never confined,
 	// whose output is added to the agent's environment (envprovider.go).
 	EnvProvider *EnvProviderConfig `json:"envProvider,omitempty"`

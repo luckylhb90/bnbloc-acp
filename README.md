@@ -74,6 +74,15 @@ configuration (Hermes, with one provider per wire protocol). `models` without
 models it did not, and a choice is applied through the agent's own switch. The agent
 refuses a model it does not know, and the room is told.
 
+### Display names for models
+
+An agent gives each model a display name beside its value in its `session/new` answer. The
+core keeps those names and the target carries them (`modelNames`, by value, only for models that
+have one and say more than the value does), so a room's picker shows what the agent calls a model
+rather than a rendering of its id. `models` may be given names the same way, with `modelNames`
+(a map of value to name); the agent's own name for a model it reports wins over a declared one.
+A target with no names is read as before.
+
 ### Agents that exist only in the sandbox
 
 An agent installed in the member's agent sandbox and nowhere else is configured

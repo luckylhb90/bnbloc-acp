@@ -192,8 +192,8 @@ func (c *Config) validate() error {
 			return fmt.Errorf("agent %q: envProvider.command is required", a.Name)
 		}
 		if a.guestOnly() {
-			if len(a.Env) > 0 || a.EnvProvider != nil || len(a.Models) > 0 {
-				return fmt.Errorf("agent %q: a guest agent (sandbox \"guest\") takes no env, envProvider or models yet: its environment is the guest's own", a.Name)
+			if len(a.Env) > 0 || a.EnvProvider != nil || len(a.ModelArgs) > 0 {
+				return fmt.Errorf("agent %q: a guest agent (sandbox \"guest\") takes no env, envProvider or modelArgs: its environment is the guest's own (the bridge's local egress providers give a space what it needs); models it switches to may be listed", a.Name)
 			}
 		}
 		if !validSandboxRouting(a.Sandbox) {

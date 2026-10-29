@@ -531,6 +531,30 @@ func TestDeclaredModelsSupplementWhatTheAgentReports(t *testing.T) {
 	}
 }
 
+// A guest agent (it exists only in the sandbox) may list models it switches to: its
+// target offers them before any live session reported its own, and still takes no
+// environment, env provider or modelArgs.
+func TestAGuestAgentMayListModels(t *testing.T) {
+	cfg, err := ParseConfig([]byte(`{"agents":[{"name":"g","command":"$HOME/g","sandbox":"guest","models":["p:a","p:b"]}]}`))
+	if err != nil {
+		t.Fatalf("a guest agent with models: %v", err)
+	}
+	r := &registry{cfg: cfg, status: map[string]agentStatus{"g": {Name: "g", Available: true}}}
+	targets := r.targets()
+	if len(targets) != 1 || !targets[0].RequiresSandbox || strings.Join(targets[0].Models, ",") != "p:a,p:b" {
+		t.Fatalf("targets = %+v", targets)
+	}
+	for _, bad := range []string{
+		`{"agents":[{"name":"g","command":"c","sandbox":"guest","env":{"A":"b"}}]}`,
+		`{"agents":[{"name":"g","command":"c","sandbox":"guest","envProvider":{"command":"x"}}]}`,
+		`{"agents":[{"name":"g","command":"c","sandbox":"guest","models":["a"],"modelArgs":["--m","{model}"]}]}`,
+	} {
+		if _, err := ParseConfig([]byte(bad)); err == nil {
+			t.Errorf("accepted %s", bad)
+		}
+	}
+}
+
 // An agent with a model option keeps it: the earlier state is read only when the
 // option is absent.
 func TestTheModelOptionWinsOverTheEarlierModelState(t *testing.T) {

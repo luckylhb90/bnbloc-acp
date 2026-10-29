@@ -287,10 +287,13 @@ func (l *sandboxLaunch) release() {
 func (l *sandboxLaunch) command(path string, args []string) *exec.Cmd {
 	if l.guest {
 		// path is the agent's command line in the guest (a shell command line:
-		// `$HOME/agents/x/bin/x` works), its arguments quoted for that shell.
+		// `$HOME/agents/x/bin/x` works), its arguments quoted for that shell, except
+		// that a leading `$NAME` of an argument names a variable of the guest's
+		// environment and expands there (guestArg): where the bridge's providers put
+		// the files they delivered is only known in the guest.
 		line := path
 		for _, a := range args {
-			line += " " + shellQuote(a)
+			line += " " + guestArg(a)
 		}
 		cmd := exec.Command(l.vmexec, "run", "--stdio", "--", line)
 		cmd.Dir = l.dir
@@ -760,6 +763,30 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 }
 
 // shellQuote quotes one argument for a POSIX shell.
+// guestArg is an argument of a guest agent's command line: quoted, except that a
+// leading `$NAME` (a shell variable name: letters, digits, underscore) is left to the
+// guest's shell and the rest, after the name, is quoted. `$FILES_DIR/x.yml`
+// becomes `"$FILES_DIR"'/x.yml'`. Nothing else is expanded: a `$` anywhere else,
+// a backtick or a parenthesis is quoted as text.
+func guestArg(a string) string {
+	if !strings.HasPrefix(a, "$") {
+		return shellQuote(a)
+	}
+	i := 1
+	for i < len(a) && (a[i] == '_' || a[i] >= 'A' && a[i] <= 'Z' || a[i] >= 'a' && a[i] <= 'z' || i > 1 && a[i] >= '0' && a[i] <= '9') {
+		i++
+	}
+	if i == 1 {
+		return shellQuote(a)
+	}
+	name, rest := a[1:i], a[i:]
+	out := `"$` + name + `"`
+	if rest != "" {
+		out += shellQuote(rest)
+	}
+	return out
+}
+
 func shellQuote(s string) string {
 	if s != "" && strings.Trim(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@%+=:,./-_") == "" {
 		return s

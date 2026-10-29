@@ -94,7 +94,10 @@ shell line: `$HOME/agents/x/node_modules/.bin/x` works), run through
   space needs comes from the bridge's local egress providers). `models` and
   `modelArgs` work as for a host agent: `models` lists models the agent switches
   to that it does not report, and `modelArgs` are added to the command line at the
-  start of a session with a chosen model. A conversation survives the idle stop and
+  start of a session with a chosen model. An argument that begins with `$NAME` names a
+  variable of the guest's environment and expands there (the rest of the argument is
+  quoted text): a guest agent that must be told where a file is, such as one the bridge's
+  providers delivered, takes it as `$NAME/file`. A conversation survives the idle stop and
   an update as any other.
 - Its files are in the guest, so `in-use.json` lists its guest paths and the
   "program is gone" fallback below does not apply to it.

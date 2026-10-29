@@ -190,3 +190,24 @@ func TestGuestAgentConfigRefusesWhatItCannotDeliver(t *testing.T) {
 		t.Errorf("a guest agent's launch args = %q", got)
 	}
 }
+
+// A leading $NAME of a guest argument is the guest's variable; nothing else expands.
+func TestGuestArgExpandsOnlyALeadingVariable(t *testing.T) {
+	for in, want := range map[string]string{
+		"acp":                     "acp",
+		"--patch":                 "--patch",
+		"$FILES/cordis.patch.yml": `"$FILES"/cordis.patch.yml`,
+		"$FILES":                  `"$FILES"`,
+		"$":                       `'$'`,
+		"$(rm -rf x)":             `'$(rm -rf x)'`,
+		"a $FILES":                `'a $FILES'`,
+		"$FILES/a b":              `"$FILES"'/a b'`,
+		"`id`":                    "'`id`'",
+		"$FILES;touch x":          `"$FILES"';touch x'`,
+		"$1/x":                    `'$1/x'`,
+	} {
+		if got := guestArg(in); got != want {
+			t.Errorf("guestArg(%q) = %s, want %s", in, got, want)
+		}
+	}
+}

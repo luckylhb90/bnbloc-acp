@@ -284,6 +284,9 @@ func TestAGuestAgentsRefusalNamesItsEnvironmentButNoValue(t *testing.T) {
 		t.Fatal("the agent refused its session; CreateSession succeeded")
 	}
 	msg := err.Error()
+	if strings.Index(msg, "[files its variables name: ") > strings.Index(msg, "[the agent's environment: ") && strings.Contains(msg, "[files its variables name: ") {
+		t.Fatalf("the short verdict must come before the long list (a cut keeps the beginning): %s", msg)
+	}
 	if !strings.Contains(msg, "[the agent's environment: ") || !strings.Contains(msg, "PWD") {
 		t.Fatalf("the refusal does not name the environment of the agent: %s", msg)
 	}
@@ -319,6 +322,9 @@ func TestAGuestAgentsRefusalSaysWhichFilesItsVariablesNameAreReadable(t *testing
 		t.Fatalf("a readable file is not reported readable: %s", msg)
 	}
 	files := msg[strings.Index(msg, "[files its variables name: "):]
+	if end := strings.Index(files, "]"); end >= 0 {
+		files = files[:end]
+	}
 	if strings.Contains(files, "ZZ_FILE_ABSENT") {
 		t.Fatalf("a file that does not exist is reported as if it did: %s", files)
 	}

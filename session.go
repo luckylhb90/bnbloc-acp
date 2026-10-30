@@ -168,11 +168,12 @@ func (s *session) open(ctx context.Context, first turnInput) error {
 		err = proc.diagnose(err)
 		// A guest agent's refusal is explained by what it was started with: the names of the
 		// variables of its environment go with the error (never their values).
+		// The short verdict comes first: a notice that is cut keeps the beginning.
+		if files := launch.guestFilesRead(ctx); len(files) > 0 {
+			err = fmt.Errorf("%w [files its variables name: %s]", err, strings.Join(files, " "))
+		}
 		if names := launch.guestEnvNames(ctx); len(names) > 0 {
 			err = fmt.Errorf("%w [the agent's environment: %s]", err, strings.Join(names, " "))
-			if files := launch.guestFilesRead(ctx); len(files) > 0 {
-				err = fmt.Errorf("%w [files its variables name: %s]", err, strings.Join(files, " "))
-			}
 		}
 		launch.distrust()
 		proc.stop()

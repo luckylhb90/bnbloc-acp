@@ -337,6 +337,32 @@ func (l *sandboxLaunch) guestEnvNames(ctx context.Context) []string {
 	return names
 }
 
+// guestFilesRead says, for each variable of the environment that names a file of the guest
+// (a value that is an absolute path), whether the agent's user can read it there: "name:ok" or
+// "name:unreadable". It is the other half of guestEnvNames: a variable can arrive and name a
+// file the agent cannot open. Only names and a verdict are returned, never a value.
+func (l *sandboxLaunch) guestFilesRead(ctx context.Context) []string {
+	if l == nil || !l.guest {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	const script = `env | while IFS= read -r line; do n=${line%%=*}; v=${line#*=}; case "$v" in /*) if [ -f "$v" ]; then if [ -r "$v" ]; then echo "$n:ok"; else echo "$n:unreadable"; fi; fi;; esac; done`
+	cmd := exec.CommandContext(ctx, l.vmexec, "run", "--stdio", "--", script)
+	cmd.Dir = l.dir
+	cmd.Env = append(os.Environ(), l.env...)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	var res []string
+	for _, line := range strings.Fields(string(out)) {
+		res = append(res, line)
+	}
+	sort.Strings(res)
+	return res
+}
+
 // tokenDir is the directory of one session's exec token file.
 func (h sandboxHost) tokenDir(sessionID string) string {
 	return filepath.Join(h.stateDir, "sessions", sessionID)

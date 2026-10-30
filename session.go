@@ -170,6 +170,9 @@ func (s *session) open(ctx context.Context, first turnInput) error {
 		// variables of its environment go with the error (never their values).
 		if names := launch.guestEnvNames(ctx); len(names) > 0 {
 			err = fmt.Errorf("%w [the agent's environment: %s]", err, strings.Join(names, " "))
+			if files := launch.guestFilesRead(ctx); len(files) > 0 {
+				err = fmt.Errorf("%w [files its variables name: %s]", err, strings.Join(files, " "))
+			}
 		}
 		launch.distrust()
 		proc.stop()

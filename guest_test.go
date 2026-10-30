@@ -291,3 +291,38 @@ func TestAGuestAgentsRefusalNamesItsEnvironmentButNoValue(t *testing.T) {
 		t.Fatalf("a value reached the error: %s", msg)
 	}
 }
+
+// A variable that names a file of the guest is reported with whether the agent's user can read
+// it (the other half of a refusal: the variable arrived and the file is not there to open).
+func TestAGuestAgentsRefusalSaysWhichFilesItsVariablesNameAreReadable(t *testing.T) {
+	h := guestHarness(t, guestAgent(t, "fake", "ACP_FAKE_AUTH=needed"), t.TempDir())
+	vmexec, _ := fakeGuestVMExec(t)
+	dir := t.TempDir()
+	ws := h.workdirWorkspace(dir)
+	exe := sbExecution(dir, vmexec, "token-g", "space-g")
+	here := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(here, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ZZ_FILE_PRESENT", here)
+	t.Setenv("ZZ_FILE_ABSENT", filepath.Join(t.TempDir(), "nope.json"))
+	exe.Sandbox.Env = []string{"ZZ_FILE_PRESENT", "ZZ_FILE_ABSENT"}
+	_, err := h.client.CreateSession(h.ctx(), h.ep, core.SessionRequest{WorkspaceID: ws, TargetID: "fake", Prompt: "hi", Options: core.SessionOptions{Execution: exe}})
+	if err == nil {
+		t.Fatal("the agent refused its session; CreateSession succeeded")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "[files its variables name: ") {
+		t.Fatalf("no verdict on the files: %s", msg)
+	}
+	if strings.Contains(msg, "ZZ_FILE_PRESENT:ok") == false {
+		t.Fatalf("a readable file is not reported readable: %s", msg)
+	}
+	files := msg[strings.Index(msg, "[files its variables name: "):]
+	if strings.Contains(files, "ZZ_FILE_ABSENT") {
+		t.Fatalf("a file that does not exist is reported as if it did: %s", files)
+	}
+	if strings.Contains(msg, here) {
+		t.Fatalf("a path (a value) reached the error: %s", msg)
+	}
+}

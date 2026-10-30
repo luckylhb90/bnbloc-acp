@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -209,5 +211,60 @@ func TestGuestArgExpandsOnlyALeadingVariable(t *testing.T) {
 		if got := guestArg(in); got != want {
 			t.Errorf("guestArg(%q) = %s, want %s", in, got, want)
 		}
+	}
+}
+
+// What a live session of a guest agent reported is kept: after the core restarts, a room's
+// picker has the agent's models before the first session of the new run, and the next live
+// session replaces them. An agent the config no longer has is not listed from the file.
+func TestAGuestAgentsModelsSurviveARestartOfTheCore(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "agents.json")
+	cfg := `{"agents":[{"name":"ghost","command":"$HOME/agents/ghost/bin/ghost","sandbox":"guest"}]}`
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	modelOpt := func(values ...string) []acpConfigOption {
+		var entries []map[string]string
+		for _, v := range values {
+			entries = append(entries, map[string]string{"value": v, "name": v})
+		}
+		opts, _ := json.Marshal(entries)
+		cur, _ := json.Marshal(values[0])
+		return []acpConfigOption{{ID: "model", Name: "Model", Category: configCategoryModel, Type: "select", CurrentValue: cur, Options: opts}}
+	}
+	first, err := newRegistry(cfgPath, probeDirFor(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.observe("ghost", acpInitializeResponse{}, modelOpt("m1", "m2"))
+
+	second, err := newRegistry(cfgPath, probeDirFor(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second.refresh(context.Background())
+	for i := 0; i < 100 && len(second.targets()) == 0; i++ {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := second.targets()[0].Models; len(got) != 2 || got[0] != "m1" {
+		t.Fatalf("models after a restart = %v", got)
+	}
+	second.observe("ghost", acpInitializeResponse{}, modelOpt("m3"))
+	if got := second.targets()[0].Models; len(got) != 1 || got[0] != "m3" {
+		t.Fatalf("the next live session replaces them: %v", got)
+	}
+
+	// The agent leaves the config: it is not listed, whatever the file says.
+	if err := os.WriteFile(cfgPath, []byte(`{"agents":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	third, err := newRegistry(cfgPath, probeDirFor(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	third.refresh(context.Background())
+	if len(third.targets()) != 0 {
+		t.Fatalf("an agent the config does not have is listed: %v", third.targets())
 	}
 }

@@ -195,6 +195,13 @@ func (r *registry) probe(ctx context.Context, a AgentConfig) agentStatus {
 			prev.CheckedAtMs = st.CheckedAtMs
 			return prev
 		}
+		// What its last live session reported (this run or an earlier one) stands
+		// until the next session reports again: a room's picker has a model list
+		// before the first session of this run.
+		if last, ok := r.lastObserved(a.Name); ok {
+			last.CheckedAtMs = st.CheckedAtMs
+			return last
+		}
 		st.Available = true
 		return st
 	}
@@ -254,6 +261,50 @@ func (r *registry) observe(name string, init acpInitializeResponse, opts []acpCo
 	st := agentStatus{Name: name, Available: true, CheckedAtMs: time.Now().UnixMilli(), MCPTransports: mcpTransports(init)}
 	applyCatalog(&st, opts)
 	r.status[name] = st
+	if a, ok := r.cfg.Agent(name); ok && a.guestOnly() {
+		r.saveObserved(name, st)
+	}
+}
+
+// observedFile keeps what live sessions of guest agents reported, by agent name: a guest agent
+// is never started between sessions, so after a restart of this core its models would be
+// unknown until a first session. A saved catalog is a starting point only: the next live
+// session replaces it, and an agent the config no longer has is never read from it.
+func (r *registry) observedFile() string { return filepath.Join(r.probeDir, "observed-catalogs.json") }
+
+func (r *registry) readObserved() map[string]agentStatus {
+	out := map[string]agentStatus{}
+	raw, err := os.ReadFile(r.observedFile())
+	if err != nil || json.Unmarshal(raw, &out) != nil {
+		return map[string]agentStatus{}
+	}
+	return out
+}
+
+// saveObserved records one agent's catalog (r.mu is held). A failure is logged, never fatal.
+func (r *registry) saveObserved(name string, st agentStatus) {
+	if err := os.MkdirAll(r.probeDir, 0o700); err != nil {
+		slog.Warn("bnbloc-acp could not keep an observed catalog", "agent", name, "error", err)
+		return
+	}
+	all := r.readObserved()
+	all[name] = st
+	raw, err := json.Marshal(all)
+	if err == nil {
+		err = writeFileAtomic(r.observedFile(), raw, 0o600)
+	}
+	if err != nil {
+		slog.Warn("bnbloc-acp could not keep an observed catalog", "agent", name, "error", err)
+	}
+}
+
+// lastObserved is the catalog a guest agent's last live session reported, when there is one.
+func (r *registry) lastObserved(name string) (agentStatus, bool) {
+	st, ok := r.readObserved()[name]
+	if !ok || !st.Available || st.Name != name {
+		return agentStatus{}, false
+	}
+	return st, true
 }
 
 // usesConfigModels: the agent reports no model selector (or was not probed

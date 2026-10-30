@@ -36,7 +36,7 @@ func (e *rpcError) Error() string {
 		return "<nil>"
 	}
 	if len(e.Data) > 0 && string(e.Data) != "null" {
-		return fmt.Sprintf("%s (code %d): %s", e.Message, e.Code, truncate(string(e.Data), 300))
+		return fmt.Sprintf("%s (code %d): %s", e.Message, e.Code, truncate(string(e.Data), 1000))
 	}
 	return fmt.Sprintf("%s (code %d)", e.Message, e.Code)
 }

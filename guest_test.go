@@ -268,3 +268,26 @@ func TestAGuestAgentsModelsSurviveARestartOfTheCore(t *testing.T) {
 		t.Fatalf("an agent the config does not have is listed: %v", third.targets())
 	}
 }
+
+// A guest agent that refuses its session says what it was started with: the names of the
+// variables of its environment, never their values (the descriptor's env is the guest's own).
+func TestAGuestAgentsRefusalNamesItsEnvironmentButNoValue(t *testing.T) {
+	h := guestHarness(t, guestAgent(t, "fake", "ACP_FAKE_AUTH=needed"), t.TempDir())
+	vmexec, _ := fakeGuestVMExec(t)
+	dir := t.TempDir()
+	ws := h.workdirWorkspace(dir)
+	exe := sbExecution(dir, vmexec, "token-g", "space-g")
+	exe.Sandbox.Env = []string{"ZZ_VISIBLE_NAME"}
+	t.Setenv("ZZ_VISIBLE_NAME", "zz-secret-value-1234")
+	_, err := h.client.CreateSession(h.ctx(), h.ep, core.SessionRequest{WorkspaceID: ws, TargetID: "fake", Prompt: "hi", Options: core.SessionOptions{Execution: exe}})
+	if err == nil {
+		t.Fatal("the agent refused its session; CreateSession succeeded")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "[the agent's environment: ") || !strings.Contains(msg, "PWD") {
+		t.Fatalf("the refusal does not name the environment of the agent: %s", msg)
+	}
+	if strings.Contains(msg, "zz-secret-value-1234") || strings.Contains(msg, "token-g") {
+		t.Fatalf("a value reached the error: %s", msg)
+	}
+}

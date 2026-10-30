@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -305,6 +306,35 @@ func (l *sandboxLaunch) command(path string, args []string) *exec.Cmd {
 	cmd := exec.Command(l.vmexec, argv...)
 	cmd.Dir = l.dir
 	return cmd
+}
+
+// guestEnvNames lists the names (never the values) of the environment a command of the guest
+// starts with, by running `env` through the same helper, directory and descriptor environment
+// the agent was started with. It is for the failure of a guest agent that could not open its
+// session: what the agent saw is what tells why it refused (a variable of its configuration
+// that did not arrive), and the guest is the only place it can be read. Empty when the helper
+// cannot run it. Bounded by a short timeout; it runs nothing of the agent's.
+func (l *sandboxLaunch) guestEnvNames(ctx context.Context) []string {
+	if l == nil || !l.guest {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, l.vmexec, "run", "--stdio", "--", "env")
+	cmd.Dir = l.dir
+	cmd.Env = append(os.Environ(), l.env...)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if name, _, ok := strings.Cut(line, "="); ok && name != "" && !strings.ContainsAny(name, " \t") {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 // tokenDir is the directory of one session's exec token file.

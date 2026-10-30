@@ -166,6 +166,11 @@ func (s *session) open(ctx context.Context, first turnInput) error {
 	var resp acpSessionResponse
 	if err := proc.call(hctx, methodSessionNew, acpNewSessionRequest{Cwd: s.ws.dir, McpServers: servers, Meta: profileMeta(s.profile, pc)}, &resp); err != nil {
 		err = proc.diagnose(err)
+		// A guest agent's refusal is explained by what it was started with: the names of the
+		// variables of its environment go with the error (never their values).
+		if names := launch.guestEnvNames(ctx); len(names) > 0 {
+			err = fmt.Errorf("%w [the agent's environment: %s]", err, strings.Join(names, " "))
+		}
 		launch.distrust()
 		proc.stop()
 		return fmt.Errorf("session/new: %w", err)

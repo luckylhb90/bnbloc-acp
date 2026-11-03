@@ -132,7 +132,7 @@ func serverCapabilities() []string {
 	caps := []string{
 		protocol.CapabilityInterrupt, protocol.CapabilityWriteFile, protocol.CapabilityDeleteWorkspace,
 		protocol.CapabilitySessionFiles, protocol.CapabilitySessionFileBytes, protocol.CapabilityAgentProfile,
-		capabilityTurnActivity, protocol.CapabilitySteer,
+		capabilityTurnActivity, protocol.CapabilitySteer, protocol.CapabilityPendingTargets,
 	}
 	if sandboxHere() {
 		caps = append(caps, protocol.CapabilitySandboxExec)

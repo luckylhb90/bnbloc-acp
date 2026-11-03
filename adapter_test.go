@@ -1169,3 +1169,31 @@ func TestDeclaredModelsCarryTheirNames(t *testing.T) {
 		t.Errorf("the agent's own name must win: %v", tg[0].ModelNames)
 	}
 }
+
+// An agent the core has not checked yet is pending (neither listed nor gone),
+// so a bridge keeps what it knew of it across a core restart; one whose check
+// answered unavailable is not pending; the core advertises pendingTargets and
+// the protocol client reads the list.
+func TestTargetsListAgentsNotCheckedYetAsPending(t *testing.T) {
+	cfg, err := ParseConfig([]byte(`{"agents":[{"name":"ready","command":"c"},{"name":"checking","command":"c"},{"name":"broken","command":"c"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &registry{cfg: cfg, status: map[string]agentStatus{
+		"ready":  {Name: "ready", Available: true},
+		"broken": {Name: "broken", Reason: "not found"},
+	}}
+	targets, pending := r.targetsAndPending()
+	if len(targets) != 1 || targets[0].ID != "ready" || strings.Join(pending, ",") != "checking" {
+		t.Fatalf("targets = %+v, pending = %v", targets, pending)
+	}
+
+	h := newHarness(t, Config{Agents: []AgentConfig{fakeAgentConfig(t, "fake", nil)}})
+	lister, ok := core.As[core.PendingTargetsLister](h.ctx(), h.client, h.ep, core.CapabilityPendingTargets)
+	if !ok {
+		t.Fatal("the core does not advertise pendingTargets")
+	}
+	if _, _, err := lister.ListTargetsPending(h.ctx(), h.ep); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -1,8 +1,4 @@
 github.com/coder/websocket v1.8.15 h1:6B2JPeOGlpff2Uz6vOEH1Vzpi0iUz20A+lPVhPHtNUA=
 github.com/coder/websocket v1.8.15/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
-github.com/luckylhb90/bnbloc v0.1.1-0.20261026102300-f10bc40c6ff4 h1:iqVE6DsJ2fwalJML1H5qBaAYWWpRkDPa0tZ5IAzD6YY=
-github.com/luckylhb90/bnbloc v0.1.1-0.20261026102300-f10bc40c6ff4/go.mod h1:NvPFA5HZA9LkYRb17Nv+mCSnftrtWAobBp//6AcEXuo=
-github.com/luckylhb90/bnbloc v0.1.1-0.20261026122429-74558287dc45 h1:RsFclRdRNRI2hTyPhnZpwJg0MnSlLgnLgBnpSmiSAuQ=
-github.com/luckylhb90/bnbloc v0.1.1-0.20261026122429-74558287dc45/go.mod h1:NvPFA5HZA9LkYRb17Nv+mCSnftrtWAobBp//6AcEXuo=
-github.com/luckylhb90/bnbloc v0.1.1-0.20261029072844-73b6124067e9 h1:SL6XWD0GdQkAWNFT5gEitmgIHx8zWun92HNi3c9IAXk=
-github.com/luckylhb90/bnbloc v0.1.1-0.20261029072844-73b6124067e9/go.mod h1:Q61ApBFiEFDJqupbEUxbT6jh+t2H2S/omkDrruEaNY4=
+github.com/luckylhb90/bnbloc v0.1.1-0.20261103064602-d9721f83b7d5 h1:qY2toxZFdO3uHp39yCCpC3K0SELhXLQZU6QJjwGsGec=
+github.com/luckylhb90/bnbloc v0.1.1-0.20261103064602-d9721f83b7d5/go.mod h1:Q61ApBFiEFDJqupbEUxbT6jh+t2H2S/omkDrruEaNY4=

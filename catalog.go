@@ -338,12 +338,26 @@ func (r *registry) statuses() []agentStatus {
 // once its agent was probed (initialize answered), so its MCP transports are
 // always known.
 func (r *registry) targets() []protocol.Target {
+	ts, _ := r.targetsAndPending()
+	return ts
+}
+
+// targetsAndPending are the available targets and the names of configured
+// agents not checked yet (pendingTargets): a caller keeps what it knew of
+// those instead of taking them for removed. An agent whose check answered
+// unavailable is neither.
+func (r *registry) targetsAndPending() ([]protocol.Target, []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := []protocol.Target{}
+	pending := []string{}
 	for _, a := range r.cfg.Agents {
 		st, ok := r.status[a.Name]
-		if !ok || !st.Available {
+		if !ok {
+			pending = append(pending, a.Name)
+			continue
+		}
+		if !st.Available {
 			continue
 		}
 		t := protocol.Target{ID: a.Name, Provider: a.Name, ReasoningEfforts: st.ReasoningEfforts, DefaultReasoning: st.DefaultReasoning, MCPTransports: st.MCPTransports, RequiresSandbox: a.guestOnly()}
@@ -356,7 +370,7 @@ func (r *registry) targets() []protocol.Target {
 		t.ModelNames = namesFor(t.Models, st.ModelNames, a.ModelNames)
 		out = append(out, t)
 	}
-	return out
+	return out, pending
 }
 
 // probeHandler answers a probe agent's client requests: nothing is allowed

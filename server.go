@@ -113,7 +113,8 @@ func (a *adapter) discover(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (a *adapter) targets(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, protocol.ListTargetsResponse{Targets: a.reg.targets()})
+	targets, pending := a.reg.targetsAndPending()
+	writeJSON(w, http.StatusOK, protocol.ListTargetsResponse{Targets: targets, Pending: pending})
 }
 
 // agents is the adapter's own status route: every configured agent with its

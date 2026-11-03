@@ -35,7 +35,7 @@ echo opencode/model-a
 // A routing config directory set up for an earlier opencode is set up again
 // for the installed one: opencode keeps the package.json it finds, so the
 // warm-up removes opencode's own setup first. The routing plugin stays.
-func TestOpencodeWarmAfterAnUpgrade(t *testing.T) {
+func TestOpencodeRoutingWarmAfterAnUpgrade(t *testing.T) {
 	needSandboxHere(t) // the routing exists where the sandbox confines; the fakes are shell scripts
 	vmexec, _ := fakeVMExec(t)
 	dir := t.TempDir()

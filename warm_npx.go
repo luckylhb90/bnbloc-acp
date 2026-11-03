@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha512"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -23,15 +24,12 @@ import (
 // the same way, for good.
 //
 // So the install is a step of its own, before the start, with no time limit but
-// a stall one (no progress for npxStall), and an entry is trusted only once
-// that step finished: a marker is written after it. An entry without the marker
-// is replaced, whatever state it is in. The entry is seeded from the host's own
-// npm cache when that has the package (a copy-on-write clone where the file
-// system has them: seconds, no extra disk, and still a copy of the space's
-// own), so the download is paid once per machine, not once per room.
-
-// npxMarker is the file in a cache entry that says the install step finished.
-const npxMarker = ".bnbloc-installed"
+// a stall one (no progress for npxStall), and an entry is a prepared directory
+// (prepared.go): trusted only with the stamp written after that step finished,
+// replaced whatever state it is in otherwise. The entry is seeded from the
+// host's own npm cache when that has the package (a copy-on-write clone where
+// the file system has them: seconds, no extra disk, and still a copy of the
+// space's own), so the download is paid once per machine, not once per room.
 
 var (
 	// npxStall is how long the install may make no progress (no file or byte
@@ -40,7 +38,44 @@ var (
 	// npxQuiet is how long a finished install (its executables linked) may sit
 	// quiet while the agent it started keeps running, before the step ends it.
 	npxQuiet = 5 * time.Second
+	// npmSpaceExpiry removes a space's npm cache unused that long (decision P4).
+	npmSpaceExpiry = 30 * 24 * time.Hour
 )
+
+// npxKind is one package's npx cache entry in a space's npm cache. Its key is
+// the package spec it was installed for; the version npm resolved it to is
+// shown by check (an entry for a range keeps working until a start from it
+// fails, which distrusts it).
+var npxKind = preparedKind{
+	Name:  "npx-package",
+	Owned: []string{"."},
+	Ready: func(dir string, _ map[string]string) bool { return linked(dir) },
+	Glob:  filepath.Join("npm-*", "_npx", "*"),
+}
+
+// npmSpaceKind is a space's npm cache: it holds the space's npx entries and is
+// removed when the space has not run an agent for npmSpaceExpiry (P4). It is
+// never built (the launch makes it), so it has no stamp of its own: its last
+// use is the newest of its entries' and its own modification time, which each
+// launch sets.
+var npmSpaceKind = preparedKind{
+	Name:        "npm-space",
+	ExpireAfter: npmSpaceExpiry,
+	Glob:        "npm-*",
+	LastUse: func(dir string) time.Time {
+		last := time.Time{}
+		if st, err := os.Stat(dir); err == nil {
+			last = st.ModTime()
+		}
+		entries, _ := filepath.Glob(filepath.Join(dir, "_npx", "*"))
+		for _, e := range entries {
+			if u := lastUse(e); u.After(last) {
+				last = u
+			}
+		}
+		return last
+	},
+}
 
 // npxSpec is the package an npx-launched agent runs ("" = the agent is not
 // launched by npx in a form this step knows: only -y/--yes/-q/--quiet and one
@@ -83,13 +118,7 @@ func hostNpmCache() string {
 // warmNpx makes sure the space's npm cache holds a finished install of spec.
 func warmNpx(ctx context.Context, l *sandboxLaunch, env []string, npmDir, spec string) error {
 	entry := filepath.Join(npmDir, "_npx", npxHash(spec))
-	if _, err := os.Stat(filepath.Join(entry, npxMarker)); err == nil {
-		return nil
-	}
-	return warmFlight(ctx, entry, "the agent's package "+spec, 0, func(run context.Context) error {
-		if _, err := os.Stat(filepath.Join(entry, npxMarker)); err == nil {
-			return nil // another request finished it
-		}
+	return ensurePrepared(ctx, entry, npxKind, map[string]string{"package": spec}, "the agent's package "+spec, 0, func(run context.Context) error {
 		return installNpx(run, l, env, npmDir, entry, spec)
 	})
 }
@@ -126,12 +155,7 @@ func installNpx(ctx context.Context, l *sandboxLaunch, env []string, npmDir, ent
 		_ = os.RemoveAll(entry)
 		return fmt.Errorf("install the agent's package %s: %s: %s", spec, why, tailText(out.String(), 400))
 	}
-	done := func() error {
-		if err := os.WriteFile(filepath.Join(entry, npxMarker), nil, 0o644); err != nil {
-			return fail(err.Error())
-		}
-		return nil
-	}
+	done := func() error { return nil } // the stamp is ensurePrepared's
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 	last, lastChange := progress(npmDir), time.Now()
@@ -212,26 +236,45 @@ func cloneNpxEntry(from, to string) {
 			return
 		}
 	}
-	// A seed is the host's install, not a finished one of the space's: no marker.
-	_ = os.Remove(filepath.Join(tmp, npxMarker))
+	// A seed is the host's install, not a finished one of the space's: no stamp.
+	_ = os.Remove(filepath.Join(tmp, preparedStamp))
 	if err := os.Rename(tmp, to); err != nil {
 		_ = os.RemoveAll(tmp)
 	}
 }
 
 // sweepUntrustedNpx removes the cache entries the install step did not finish
-// (a half install, or a full copy made before the step existed): none is used
-// again, each is replaced by a seeded one at its space's next start, and a
-// full copy of a package is hundreds of megabytes. At start no agent runs from
-// any of them.
+// (a half install, a failed one, or one from before stamps: decision P1): none
+// is used again, each is replaced by a seeded one at its space's next start,
+// and a full copy of a package is hundreds of megabytes. At start no agent runs
+// from any of them.
 func sweepUntrustedNpx(stateDir string) {
-	entries, _ := filepath.Glob(filepath.Join(stateDir, "npm-*", "_npx", "*"))
+	entries, _ := filepath.Glob(filepath.Join(stateDir, npxKind.Glob))
 	for _, e := range entries {
 		if st, err := os.Stat(e); err != nil || !st.IsDir() {
 			continue
 		}
-		if _, err := os.Stat(filepath.Join(e, npxMarker)); err != nil {
+		if s, ok := readStamp(e); !ok || s.Key == nil {
 			_ = os.RemoveAll(e)
 		}
 	}
+}
+
+// npxInstalled is the version npm installed in an entry ("" = unknown).
+func npxInstalled(entry, spec string) string {
+	name := spec
+	if i := strings.LastIndex(spec, "@"); i > 0 {
+		name = spec[:i]
+	}
+	raw, err := os.ReadFile(filepath.Join(entry, "node_modules", filepath.FromSlash(name), "package.json"))
+	if err != nil {
+		return ""
+	}
+	var p struct {
+		Version string `json:"version"`
+	}
+	if json.Unmarshal(raw, &p) != nil {
+		return ""
+	}
+	return p.Version
 }

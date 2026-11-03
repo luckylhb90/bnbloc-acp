@@ -44,6 +44,10 @@ func main() {
 
 type options struct {
 	listen, home, config, name string
+	// repair (check --repair): rebuild nothing in place, but clear every
+	// prepared directory that is stale, unstamped or held after a failure, so
+	// the next start builds it afresh, and remove unused ones (P3).
+	repair bool
 }
 
 func parseOptions(name string, args []string) (options, error) {
@@ -53,6 +57,9 @@ func parseOptions(name string, args []string) (options, error) {
 	fs.StringVar(&o.home, "home", os.Getenv("BNBLOC_ACP_HOME"), "state directory: agents.json and workspaces/ (default <user config dir>/bnbloc-acp)")
 	fs.StringVar(&o.config, "config", os.Getenv("BNBLOC_ACP_CONFIG"), "agent config file (default <home>/agents.json)")
 	fs.StringVar(&o.name, "name", "acp", "core name reported in discovery")
+	if name == "check" {
+		fs.BoolVar(&o.repair, "repair", false, "clear prepared state that is stale, unfinished or held after a failure (the next start prepares it again), and remove unused state")
+	}
 	if err := fs.Parse(args); err != nil {
 		return o, err
 	}
@@ -211,7 +218,7 @@ func check(o options, out io.Writer) error {
 		return err
 	}
 	printNotes(out, cfg)
-	return nil
+	return checkPrepared(filepath.Join(o.home, "sandbox"), o.repair, time.Now(), out)
 }
 
 // printNotes says what the merged config left out (a drop-in's agent that

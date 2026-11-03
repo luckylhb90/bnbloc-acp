@@ -73,7 +73,7 @@ func npxLaunch(t *testing.T) (*sandboxLaunch, string) {
 
 const installOK = `mkdir -p "$E/node_modules/.bin" && echo x > "$E/node_modules/.bin/agent"`
 
-func TestWarmNpxInstallsOnceAndTrustsItsMarker(t *testing.T) {
+func TestWarmNpxInstallsOnceAndTrustsItsStamp(t *testing.T) {
 	needSandboxHere(t)
 	const spec = "pkg"
 	calls := fakeNpxEnv(t, spec, installOK)
@@ -84,16 +84,16 @@ func TestWarmNpxInstallsOnceAndTrustsItsMarker(t *testing.T) {
 		}
 	}
 	if n := countCalls(t, calls); n != 1 {
-		t.Errorf("npx ran %d times for two warm-ups; the marker should make the second free", n)
+		t.Errorf("npx ran %d times for two warm-ups; the stamp should make the second free", n)
 	}
-	if _, err := os.Stat(filepath.Join(npmDir, "_npx", npxHash(spec), npxMarker)); err != nil {
-		t.Errorf("no marker after the install: %v", err)
+	if !preparedCurrent(filepath.Join(npmDir, "_npx", npxHash(spec)), npxKind, map[string]string{"package": spec}) {
+		t.Error("no stamp after the install")
 	}
 }
 
 // An entry the step did not finish is replaced, whatever it holds: a half install
 // looks installed to npm and never heals.
-func TestWarmNpxReplacesAnEntryWithoutTheMarker(t *testing.T) {
+func TestWarmNpxReplacesAnEntryWithoutTheStamp(t *testing.T) {
 	needSandboxHere(t)
 	const spec = "pkg"
 	fakeNpxEnv(t, spec, installOK)
@@ -156,7 +156,7 @@ func TestWarmNpxFailureLeavesNoEntryAndRefuses(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "network") {
 		t.Fatalf("err = %v, want the install's own message", err)
 	}
-	if _, err := os.Stat(filepath.Join(npmDir, "_npx", npxHash(spec))); err == nil {
+	if preparedCurrent(filepath.Join(npmDir, "_npx", npxHash(spec)), npxKind, map[string]string{"package": spec}) {
 		t.Error("a failed install left its entry for the next start to trust")
 	}
 }
@@ -205,7 +205,7 @@ func TestSweepRemovesOnlyUnfinishedNpxEntries(t *testing.T) {
 			t.Fatal(err)
 		}
 		if finished {
-			if err := os.WriteFile(filepath.Join(e, npxMarker), nil, 0o644); err != nil {
+			if err := writeStamp(e, stamp{Kind: npxKind.Name, Key: map[string]string{"package": "p"}}); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -222,10 +222,10 @@ func TestSweepRemovesOnlyUnfinishedNpxEntries(t *testing.T) {
 
 // An agent that failed to start from an entry makes it untrusted: the next start
 // replaces it. A launch with no npx entry (an agent not run through npx) is left alone.
-func TestDistrustRemovesTheMarker(t *testing.T) {
+func TestDistrustRemovesTheStamp(t *testing.T) {
 	entry := t.TempDir()
-	marker := filepath.Join(entry, npxMarker)
-	if err := os.WriteFile(marker, nil, 0o644); err != nil {
+	marker := filepath.Join(entry, preparedStamp)
+	if err := writeStamp(entry, stamp{Kind: npxKind.Name, Key: map[string]string{"package": "p"}}); err != nil {
 		t.Fatal(err)
 	}
 	(&sandboxLaunch{}).distrust()

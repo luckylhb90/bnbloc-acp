@@ -193,9 +193,23 @@ manager writes `agents.d/agent-manager.json` for the agents it installs.
 Check what works:
 
 ```sh
-bnbloc-acp check     # every agent: available, or why not (missing command, not signed in, …)
+bnbloc-acp check            # every agent: available, or why not; and the prepared state below
+bnbloc-acp check --repair   # clear stale, unfinished and failed prepared state, remove unused state
 bnbloc-acp version
 ```
+
+### Prepared state
+
+What the core builds for the agents' sandboxed runs (opencode's routing
+config, each space's npm installs) is a prepared directory: it carries a
+stamp naming what it was built for (the opencode version, the routing plugin,
+the package), and the core uses it only when the stamp names what it would
+build now. Anything else (opencode upgraded, no stamp, a half build) is
+rebuilt before the session starts, once; a start that fails from it marks it
+for a rebuild; a rebuild that fails again for the same version is reported
+and waits until the version changes or `check --repair`. A space's npm cache
+unused for 30 days is removed at start. `check` lists every prepared
+directory, its state, size and last use.
 
 An agent that is not installed or not signed in is listed as unavailable with
 the reason and offers no target; nothing else breaks.

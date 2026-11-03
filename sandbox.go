@@ -269,8 +269,8 @@ type sandboxLaunch struct {
 // is whole to npm and not to the agent), so it loses its marker and the next
 // start replaces it, from the host's copy, in seconds.
 func (l *sandboxLaunch) distrust() {
-	if l != nil && l.npxEntry != "" {
-		_ = os.Remove(filepath.Join(l.npxEntry, npxMarker))
+	if l != nil {
+		distrustPrepared(l.npxEntry)
 	}
 }
 
@@ -389,6 +389,7 @@ func (h sandboxHost) removeToken(sessionID string) { _ = os.RemoveAll(h.tokenDir
 func (h sandboxHost) sweep() {
 	_ = os.RemoveAll(filepath.Join(h.stateDir, "sessions"))
 	sweepUntrustedNpx(h.stateDir)
+	expirePrepared(h.stateDir, preparedKinds, time.Now())
 }
 
 // prepareLaunch builds the confined launch of an agent for the session's
@@ -452,6 +453,8 @@ func (h sandboxHost) prepareLaunch(ctx context.Context, agent AgentConfig, s cor
 	if err := os.MkdirAll(npmDir, 0o700); err != nil {
 		return nil, fmt.Errorf("the agent's npm cache: %w", err)
 	}
+	now := time.Now()
+	_ = os.Chtimes(npmDir, now, now) // its last use (npmSpaceKind.LastUse, P4)
 	env = append(env, "npm_config_cache="+npmDir)
 	l.flags = append(l.flags, "--allow-read", npmDir, "--allow-write", npmDir)
 	// The package is installed before the agent starts, outside the handshake's
@@ -575,7 +578,8 @@ func (h sandboxHost) prepareOpencode(ctx context.Context, l *sandboxLaunch, env 
 		return "", fmt.Errorf("opencode routing config: %w", err)
 	}
 	vm, _ := json.Marshal(s.VMExec)
-	if err := writeFileAtomic(filepath.Join(pluginDir, "bnbloc-vmexec.js"), []byte(fmt.Sprintf(opencodePlugin, vm)), 0o644); err != nil {
+	plugin := []byte(fmt.Sprintf(opencodePlugin, vm))
+	if err := writeFileAtomic(filepath.Join(pluginDir, "bnbloc-vmexec.js"), plugin, 0o644); err != nil {
 		return "", fmt.Errorf("opencode routing plugin: %w", err)
 	}
 	if err := warmOpencodeFn(ctx, l, env, dir); err != nil {
@@ -606,32 +610,30 @@ func warmOpencode(ctx context.Context, l *sandboxLaunch, env []string, dir strin
 	if err != nil {
 		return err
 	}
-	if opencodeConfigWarm(dir, ver) {
-		return nil
-	}
-	return warmFlight(ctx, dir, "the opencode routing config", 3*time.Minute, func(run context.Context) error {
-		if opencodeConfigWarm(dir, ver) {
-			return nil // another request finished it
-		}
-		resetOpencodeSetup(dir)
+	return ensurePrepared(ctx, dir, opencodeKind, opencodeKey(dir, ver), "the opencode routing config", 3*time.Minute, func(run context.Context) error {
 		return runOpencodeWarm(run, l, env, dir, bin, ver)
 	})
 }
 
-// opencodeSetupFiles are what opencode writes into a config directory for its
-// plugin SDK. opencode keeps a package.json it finds, so after an upgrade the
-// directory stays pinned to the previous SDK and is never ready for the new
-// version (2026-11-03: opencode 1.19.5 over a 1.18.35 setup failed every
-// sandboxed session). They are removed before a warm-up so opencode writes them
-// for its own version; the routing plugin and the npm cache stay.
-var opencodeSetupFiles = []string{"package.json", "package-lock.json", "node_modules"}
+// opencodeKind is opencode's routing config directory (prepared.go). Its owned
+// paths are what opencode writes for its plugin SDK: opencode keeps a
+// package.json it finds, so they are removed before a rebuild or the directory
+// stays pinned to the previous SDK (2026-11-03: opencode 1.19.5 over a 1.18.35
+// setup failed every sandboxed session). The routing plugin and the npm cache
+// stay.
+var opencodeKind = preparedKind{
+	Name:  "opencode-routing",
+	Owned: []string{"package.json", "package-lock.json", "node_modules", ".gitignore"},
+	Ready: func(dir string, key map[string]string) bool { return opencodeConfigWarm(dir, key["opencode"]) },
+	Glob:  "opencode-*",
+}
 
-// resetOpencodeSetup removes opencode's own setup from dir (a directory of
-// the core's: nothing else writes it).
-func resetOpencodeSetup(dir string) {
-	for _, name := range opencodeSetupFiles {
-		_ = os.RemoveAll(filepath.Join(dir, name))
-	}
+// opencodeKey is what the directory is built for: the opencode version and
+// the routing plugin the core wrote (it names the sandbox helper).
+func opencodeKey(dir, ver string) map[string]string {
+	raw, _ := os.ReadFile(filepath.Join(dir, "plugin", "bnbloc-vmexec.js"))
+	sum := sha256.Sum256(raw)
+	return map[string]string{"opencode": ver, "plugin": hex.EncodeToString(sum[:8])}
 }
 
 // warmFlights are the preparations in progress, by directory.

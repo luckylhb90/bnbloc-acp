@@ -36,6 +36,7 @@ echo opencode/model-a
 // for the installed one: opencode keeps the package.json it finds, so the
 // warm-up removes opencode's own setup first. The routing plugin stays.
 func TestOpencodeWarmAfterAnUpgrade(t *testing.T) {
+	needSandboxHere(t) // the routing exists where the sandbox confines; the fakes are shell scripts
 	vmexec, _ := fakeVMExec(t)
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "plugin"), 0o755); err != nil {

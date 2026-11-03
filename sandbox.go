@@ -609,7 +609,29 @@ func warmOpencode(ctx context.Context, l *sandboxLaunch, env []string, dir strin
 	if opencodeConfigWarm(dir, ver) {
 		return nil
 	}
-	return warmFlight(ctx, dir, "the opencode routing config", 3*time.Minute, func(run context.Context) error { return runOpencodeWarm(run, l, env, dir, bin, ver) })
+	return warmFlight(ctx, dir, "the opencode routing config", 3*time.Minute, func(run context.Context) error {
+		if opencodeConfigWarm(dir, ver) {
+			return nil // another request finished it
+		}
+		resetOpencodeSetup(dir)
+		return runOpencodeWarm(run, l, env, dir, bin, ver)
+	})
+}
+
+// opencodeSetupFiles are what opencode writes into a config directory for its
+// plugin SDK. opencode keeps a package.json it finds, so after an upgrade the
+// directory stays pinned to the previous SDK and is never ready for the new
+// version (2026-11-03: opencode 1.19.5 over a 1.18.35 setup failed every
+// sandboxed session). They are removed before a warm-up so opencode writes them
+// for its own version; the routing plugin and the npm cache stay.
+var opencodeSetupFiles = []string{"package.json", "package-lock.json", "node_modules"}
+
+// resetOpencodeSetup removes opencode's own setup from dir (a directory of
+// the core's: nothing else writes it).
+func resetOpencodeSetup(dir string) {
+	for _, name := range opencodeSetupFiles {
+		_ = os.RemoveAll(filepath.Join(dir, name))
+	}
 }
 
 // warmFlights are the preparations in progress, by directory.
